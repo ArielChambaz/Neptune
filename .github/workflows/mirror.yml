@@ -1,5 +1,4 @@
 name: Mirror to Another GitHub Repository
-
 on:
   push:
     branches:
@@ -13,7 +12,6 @@ jobs:
       - name: Checkout the repository
         uses: actions/checkout@v2
 
-      - name: Push to the target repository
       - name: Push to the target repository
         env:
           TARGET_REPO: ${{ secrets.TARGET_REPO }}  # Ajoute l'URL du dépôt cible dans les secrets
