@@ -29,4 +29,3 @@ jobs:
           git checkout ${{ github.ref_name }}
           git pull origin ${{ github.ref_name }}
           git push $DEST_REPO ${{ github.ref_name }} --force
-          
