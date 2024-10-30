@@ -22,6 +22,12 @@ jobs:
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan github.com >> ~/.ssh/known_hosts
 
+      - name: Configure Git
+        run: |
+          git config --global user.email "ariel.chambaz@epitech.eu"
+          git config --global user.name "ArielChambaz"
+          git config --global pull.rebase false  # Use merge strategy by default
+
       - name: Pull from destination repository
         env:
           DEST_REPO: git@github.com:EpitechPromo2026/G-EIP-700-REN-7-1-eip-adrien.picot.git
