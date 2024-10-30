@@ -12,7 +12,7 @@ jobs:
       - name: Checkout source repository
         uses: actions/checkout@v2
         with:
-          repository: https://github.com/ArielChambaz/Neptune
+          repository: ArielChambaz/Neptune
           ref: ${{ github.ref }}
           token: ${{ secrets.GITHUB_TOKEN }}
           path: source
