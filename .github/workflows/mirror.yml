@@ -1,9 +1,9 @@
 name: Mirror All Branches
 
 on:
-  push:  # Lance le workflow à chaque changement sur le dépôt source
-    branches: '**'  # Capture toutes les branches
-  workflow_dispatch:  # Permet un déclenchement manuel
+  push:
+    branches: '**'
+  workflow_dispatch: 
 
 jobs:
   mirror:
@@ -15,11 +15,15 @@ jobs:
         with:
           repository: ArielChambaz/Neptune
           token: ${{ secrets.PERSONAL_ACCESS_TOKEN}}
-          fetch-depth: 0  # Nécessaire pour cloner toutes les branches
+          fetch-depth: 0 
+
+      - name: Remove .github directory
+        run: |
+          rm -rf .github
 
       - name: Mirror Push to Destination Repository
         run: |
-          git remote add destination https://github.com/EpitechPromo2026/G-EIP-700-REN-7-1-eip-adrien.picot.git  # Remplace par ton dépôt miroir
+          git remote add destination https://github.com/EpitechPromo2026/G-EIP-700-REN-7-1-eip-adrien.picot.git
           git push --mirror destination
         env:
           GH_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN}}
