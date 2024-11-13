@@ -2,36 +2,28 @@
 # pip install -r requirements.txt
 
 # Basic Python libraries
-numpy>=1.21.0
-opencv-python>=4.5.3
-matplotlib>=3.4.3
-pillow>=9.0.1
+numpy>=1.26.4
+opencv-python>=4.10.0.84
+matplotlib>=3.8.4
+pillow>=10.3.0
 
 # PyTorch (required for YOLOv5 and YOLOv8)
-torch>=2.0.0
-torchvision>=0.15.0
+torch>=2.4.1
+torchvision>=0.19.1
 
-# YOLOv5 dependencies
-# Note: YOLOv5 is maintained by Ultralytics
-ultralytics>=8.0.0
-requests>=2.25.1
-scipy>=1.6.0
-pandas>=1.1.0
-PyYAML>=5.3.1
-seaborn>=0.11.0
+# YOLO dependencies
+# Note: YOLO is maintained by Ultralytics
+ultralytics>=8.3.24
+requests>=2.32.2
+scipy>=1.13.1
+pandas>=2.2.2
+PyYAML>=6.0.1
+seaborn>=0.13.2
 
-# YOLOv8 dependencies
-# Note: YOLOv8 is integrated into Ultralytics package (version 8 or later)
-ultralytics>=8.0.0
-
-# MediaPipe\# Use the following for MediaPipe pose estimation
-mediapipe>=0.10.0
-
-# Utilitaires
-protobuf>=3.19.0
-scikit-learn>=0.24.2
-rich>=12.3.0
+protobuf>=4.25.5
+scikit-learn>=1.4.2
+rich>=13.3.5
 
 # Jupyter for notebook support (optional)
 jupyter>=1.0.0
-ipython>=7.29.0
+ipython>=8.25.0
