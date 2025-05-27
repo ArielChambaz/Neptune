@@ -7,3 +7,4 @@ beach-data
 *.MOV
 *.mp4
 */data
+*/bun.lock
