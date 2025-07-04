@@ -1,0 +1,149 @@
+"""
+Wrappe tout le code de dfine_homography pour qu'il produise une
+suite d'images OpenCV déjà annotées, prêtes à streamer en MJPEG.
+"""
+
+from pathlib import Path
+import cv2, numpy as np, torch, time
+from transformers import AutoImageProcessor, DFineForObjectDetection
+from ultralytics import YOLO
+
+
+class HomographyProcessor:
+    # ───────────── CONFIG ───────────── #
+    MAP_W_PX, MAP_H_PX = 400, 200
+    UPDATE_EVERY = 300                 # toutes les 300 frames on recalcule H
+    CONF_THRES = 0.25
+    MIN_WATER_AREA_PX = 5_000
+
+    def __init__(self, video_path: str):
+        self.cap = cv2.VideoCapture(str(Path(video_path)))
+        if not self.cap.isOpened():
+            raise IOError(f"Impossible d’ouvrir la vidéo : {video_path}")
+
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        # Modèles
+        self.water_seg = YOLO("water-detection/model-v2/nwd-v2.pt")
+        self.processor = AutoImageProcessor.from_pretrained(
+            "ustc-community/dfine-xlarge-obj2coco"
+        )
+        self.dfine = DFineForObjectDetection.from_pretrained(
+            "ustc-community/dfine-xlarge-obj2coco"
+        ).to(self.device).eval()
+
+        # Géométrie
+        self.DST_RECT = np.array(
+            [[0, 0],
+             [self.MAP_W_PX, 0],
+             [self.MAP_W_PX, self.MAP_H_PX],
+             [0, self.MAP_H_PX]],
+            dtype=np.float32,
+        )
+        self.H_latest: np.ndarray | None = None
+        self.frame_idx = 0
+
+    # ---------- Détection de personnes ----------
+    @torch.inference_mode()
+    def _detect_persons(self, frame_bgr):
+        inputs = self.processor(images=frame_bgr[:, :, ::-1],
+                                return_tensors="pt").to(self.device)
+        outputs = self.dfine(**inputs)
+        results = self.processor.post_process_object_detection(
+            outputs,
+            target_sizes=[(frame_bgr.shape[0], frame_bgr.shape[1])],
+            threshold=self.CONF_THRES,
+        )[0]
+
+        people = []
+        for box, label, score in zip(
+            results["boxes"], results["labels"], results["scores"]
+        ):
+            if label.item() == 0:  # id COCO 0 = person
+                people.append((box.cpu().numpy(), score.item()))
+        return people
+
+    # ---------- Pipeline frame → frame annotée ----------
+    def _process_frame(self, frame_bgr):
+        self.frame_idx += 1
+
+        # 1) (de temps en temps) recalcul de l’homographie
+        if self.frame_idx % self.UPDATE_EVERY == 1:
+            seg = self.water_seg.predict(
+                frame_bgr, imgsz=512, task="segment", conf=0.25, verbose=False
+            )[0]
+            if seg.masks is not None:
+                mask_small = (seg.masks.data.cpu().numpy() > 0.5
+                              ).any(axis=0).astype(np.uint8)
+                mask = cv2.resize(
+                    mask_small,
+                    (frame_bgr.shape[1], frame_bgr.shape[0]),
+                    interpolation=cv2.INTER_NEAREST,
+                )
+                cnts, _ = cv2.findContours(
+                    mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+                )
+                if cnts:
+                    main_cnt = max(cnts, key=cv2.contourArea)
+                    if cv2.contourArea(main_cnt) > self.MIN_WATER_AREA_PX:
+                        pts = main_cnt.reshape(-1, 2).astype(np.float32)
+                        sums = pts.sum(axis=1)
+                        diffs = np.diff(pts, axis=1).reshape(-1)
+                        src_quad = np.array(
+                            [pts[np.argmin(sums)],
+                             pts[np.argmin(diffs)],
+                             pts[np.argmax(sums)],
+                             pts[np.argmax(diffs)]],
+                            dtype=np.float32,
+                        )
+                        H, _ = cv2.findHomography(src_quad,
+                                                  self.DST_RECT,
+                                                  cv2.RANSAC, 3.0)
+                        if H is not None:
+                            self.H_latest = H
+
+        # 2) Si pas encore d’H, on renvoie le frame brut
+        if self.H_latest is None:
+            return frame_bgr
+
+        # 3) Détection de personnes + affichage sur la mini-carte
+        people = self._detect_persons(frame_bgr)
+
+        map_canvas = np.full(
+            (self.MAP_H_PX, self.MAP_W_PX, 3), 80, np.uint8
+        )  # gris
+
+        if people:
+            centers = np.array(
+                [[[ (b[0][0] + b[0][2]) / 2,
+                    (b[0][1] + b[0][3]) / 2 ]]
+                for b in people],
+                dtype=np.float32,
+            )
+            proj = cv2.perspectiveTransform(centers, self.H_latest)
+            for x, y in proj.reshape(-1, 2):
+                cv2.circle(map_canvas, (int(x), int(y)), 4, (255, 255, 255), -1)
+            # Dessine les boxes sur la vidéo
+            for box, _ in people:
+                x0, y0, x1, y1 = box.astype(int)
+                cv2.rectangle(frame_bgr, (x0, y0), (x1, y1), (255, 0, 0), 2)
+
+        # 4) Injection de la mini-carte en overlay
+        DISPLAY_W, DISPLAY_H = 1280, 720
+        MINIMAP_W, MINIMAP_H, PAD = 320, 160, 12
+        vis = cv2.resize(frame_bgr, (DISPLAY_W, DISPLAY_H),
+                         interpolation=cv2.INTER_AREA)
+        map_small = cv2.resize(map_canvas, (MINIMAP_W, MINIMAP_H))
+        x0, y0 = DISPLAY_W - MINIMAP_W - PAD, PAD
+        vis[y0:y0 + MINIMAP_H, x0:x0 + MINIMAP_W] = map_small
+        return vis
+
+    # ---------- Générateur infini pour le streaming ----------
+    def frames(self):
+        while True:
+            ok, frame = self.cap.read()
+            if not ok:
+                # boucle infinie
+                self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                continue
+            yield self._process_frame(frame)
