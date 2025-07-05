@@ -12,8 +12,8 @@ from datetime import datetime
 
 # Config
 DEVICE           = "cuda" if torch.cuda.is_available() else "cpu"
-VIDEO_PATH       = "./homography/data/IMG_6863.MOV"
-SEG_MODEL_PATH   = "water-detection/model-v2/nwd-v2.pt"
+VIDEO_PATH       = "data/IMG_9708.MOV"
+SEG_MODEL_PATH   = "model/nwd-v2.pt"
 CONF_THRES       = 0.4
 MAP_W_PX, MAP_H_PX = 400, 200
 UPDATE_EVERY     = 300
@@ -257,12 +257,22 @@ class UnderwaterPersonTracker:
 @torch.inference_mode()
 def detect_persons_dfine(frame_bgr, conf_thres=CONF_THRES):
     inputs = processor(images=frame_bgr[:, :, ::-1], return_tensors="pt").to(DEVICE)
+
+    # Fix dtype mismatch: cast input to float16 if model is in half precision
+    if DEVICE == "cuda":
+        inputs["pixel_values"] = inputs["pixel_values"].to(dtype=torch.float16)
+
     outputs = dfine(**inputs)
-    results = processor.post_process_object_detection(outputs, target_sizes=[(frame_bgr.shape[0], frame_bgr.shape[1])], threshold=conf_thres,)[0]
+    
+    results = processor.post_process_object_detection(
+        outputs,
+        target_sizes=[(frame_bgr.shape[0], frame_bgr.shape[1])],
+        threshold=conf_thres,
+    )[0]
 
     persons = []
     for box, label, score in zip(results["boxes"], results["labels"], results["scores"]):
-        if label.item() == 0:              # id COCO 0 = person
+        if label.item() == 0:  # class 0 = person
             x0, y0, x1, y1 = box.tolist()
             cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
             persons.append(BoxStub(cx, cy, x1 - x0, y1 - y0, score.item()))
