@@ -6,4 +6,10 @@ tensorboard
 scipy
 calflops
 transformers
+<<<<<<< HEAD
 loguru
+=======
+loguru
+opencv-python
+ultralytics>=8.0.0
+>>>>>>> b61785a8b697dacd1bf17b8a44a4296cbc98dbaf

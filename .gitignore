@@ -7,4 +7,10 @@ beach-data
 *.MOV
 *.mp4
 */data
+<<<<<<< HEAD
 */bun.lock
+=======
+*/bun.lock
+*.venv
+*.env
+>>>>>>> b61785a8b697dacd1bf17b8a44a4296cbc98dbaf
