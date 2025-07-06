@@ -12,8 +12,8 @@ from datetime import datetime
 
 # Config
 DEVICE           = "cuda" if torch.cuda.is_available() else "cpu"
-VIDEO_PATH       = "homography/data/clip.mp4"
-SEG_MODEL_PATH   = "water-detection/model-v2/nwd-v2.pt"
+VIDEO_PATH       = "data/clideo_editor_7fe7e5ff50a443ecb7ec66f86cc8df11.mp4"
+SEG_MODEL_PATH   = "model/nwd-v2.pt"
 CONF_THRES       = 0.4
 MAP_W_PX, MAP_H_PX = 400, 200
 UPDATE_EVERY     = 300
@@ -217,6 +217,26 @@ class UnderwaterPersonTracker:
                 track['disappeared'] += 1
                 track['frames_underwater'] += 1
                 track['frames_on_surface'] = 0
+                
+                # Update status based on frames underwater
+                if track['frames_underwater'] >= UNDERWATER_THRESHOLD:
+                    if track['status'] != 'underwater':
+                        # Just went underwater
+                        track['status'] = 'underwater'
+                        track['underwater_start_time'] = frame_timestamp
+                        track['dive_point'] = track['center']
+                        track['danger_alert_sent'] = False
+                        print(f"🌊 Person {track_id} went UNDERWATER")
+
+                    # Update underwater duration
+                    if track['underwater_start_time']:
+                        track['underwater_duration'] = frame_timestamp - track['underwater_start_time']
+
+                        # Check for danger threshold
+                        if (track['underwater_duration'] > DANGER_TIME_THRESHOLD and 
+                            not track['danger_alert_sent']):
+                            print(f"🚨 DANGER ALERT: Person {track_id} underwater for {track['underwater_duration']:.1f}s!")
+                            track['danger_alert_sent'] = True
 
         # Remove tracks that have been missing too long
         to_remove = []
@@ -232,6 +252,12 @@ class UnderwaterPersonTracker:
 
         for track_id in to_remove:
             del self.tracks[track_id]
+
+        # Update dangerosity scores for all tracks
+        for track_id, track in self.tracks.items():
+            # Calculate distance from shore (will be updated later in the main loop)
+            distance_from_shore = track.get('distance_from_shore', 0)
+            track['dangerosity_score'] = calculate_dangerosity_score(track, frame_timestamp, distance_from_shore)
 
         return assignments
 
@@ -314,63 +340,40 @@ def calculate_dangerosity_score(track, frame_timestamp, distance_from_shore=0):
     """
     score = 0
 
-    # Si à la surface, score faible selon distance du rivage
-    if track['status'] != 'underwater':
-        score = min(20, int(distance_from_shore * 20))
-        return score
-
-    # Sous l'eau : base 30 pts
-    score = 30
-
-    # Temps sous l'eau (0–40 pts)
-    if track['underwater_start_time']:
-        t = frame_timestamp - track['underwater_start_time']
-        if t > DANGER_TIME_THRESHOLD:
-            score += 40
-            # Alerte unique
-            if not track['danger_alert_sent']:
-                print(f"🚨 DANGER ALERT: Person {track_id} underwater for {t:.1f}s!")
-                track['danger_alert_sent'] = True
-        else:
-            score += int((t / DANGER_TIME_THRESHOLD) * 40)
-
-    # Distance du rivage (0–20 pts)
+    # Base score for distance from shore (always applies)
     score += int(distance_from_shore * 20)
 
-    # Frames underwater en excès (0–10 pts)
-    if track['frames_underwater'] > UNDERWATER_THRESHOLD:
-        excess = track['frames_underwater'] - UNDERWATER_THRESHOLD
-        score += min(10, excess // 10)
+    # Check if person is diving or underwater based on frames underwater
+    if track['frames_underwater'] > 0:
+        # Person is diving or underwater - calculate progressive score
+        
+        # Base diving score (10-30 pts based on frames underwater)
+        diving_progress = min(track['frames_underwater'] / UNDERWATER_THRESHOLD, 1.0)
+        score += int(10 + (diving_progress * 20))  # 10-30 pts
+        
+        # If officially underwater, add more points
+        if track['status'] == 'underwater':
+            score += 20  # Additional 20 pts for being officially underwater
+            
+            # Time underwater factor (0-40 pts)
+            if track['underwater_start_time']:
+                t = frame_timestamp - track['underwater_start_time']
+                if t > DANGER_TIME_THRESHOLD:
+                    score += 40
+                    # Unique alert
+                    if not track['danger_alert_sent']:
+                        print(f"🚨 DANGER ALERT: Person underwater for {t:.1f}s!")
+                        track['danger_alert_sent'] = True
+                else:
+                    score += int((t / DANGER_TIME_THRESHOLD) * 40)
+        
+        # Frames underwater excess factor (0-10 pts)
+        if track['frames_underwater'] > UNDERWATER_THRESHOLD:
+            excess = track['frames_underwater'] - UNDERWATER_THRESHOLD
+            score += min(10, excess // 10)
 
     return min(100, score)
     
-    # Base score - not in water = 0
-    if track['status'] != 'underwater':
-        # Surface score based on proximity to water edge
-        score = min(20, int(distance_from_shore * 20))
-        return score
-    
-    # Underwater scoring
-    score = 30  # Base underwater score
-    
-    # Time underwater factor (0-40 points)
-    if track['underwater_start_time']:
-        underwater_time = frame_timestamp - track['underwater_start_time']
-        if underwater_time > DANGER_TIME_THRESHOLD:
-            score += 40  # Maximum time danger
-        else:
-            score += int((underwater_time / DANGER_TIME_THRESHOLD) * 40)
-    
-    # Distance from shore factor (0-20 points)
-    score += int(distance_from_shore * 20)
-    
-    # Consecutive underwater frames factor (0-10 points)
-    if track['frames_underwater'] > UNDERWATER_THRESHOLD:
-        excess_frames = track['frames_underwater'] - UNDERWATER_THRESHOLD
-        score += min(10, int(excess_frames / 10))
-    
-    return min(100, score)
-
 def get_color_by_dangerosity(score):
     """
     Get color based on dangerosity score with gradient
@@ -574,12 +577,6 @@ while True:
                            (int(x) + 8, int(y) - 8),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.3, color, 1)
 
-                # Add ID and dangerosity score
-                cv2.putText(map_canvas, f"{track_id}({track['dangerosity_score']})", 
-                           (int(x) + 8, int(y) - 8),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.3, color, 1)
-
-
         # Draw track history with color gradient
         if len(track['history']) > 1:
             color = get_color_by_dangerosity(track['dangerosity_score'])
@@ -594,6 +591,20 @@ while True:
             if len(history_points) > 1:
                 pts = np.array(history_points, dtype=np.int32)
                 cv2.polylines(map_canvas, [pts], False, color, 1)
+
+    # Update dangerosity scores for ALL tracks (including underwater ones not in active_tracks)
+    for track_id, track in tracker.tracks.items():
+        if track_id not in active_tracks and track['center']:
+            # For underwater tracks, use their last known position
+            cx, cy = track['center']
+            center = np.array([[[cx, cy]]], dtype=np.float32)
+            proj = cv2.perspectiveTransform(center, H_latest)
+            x, y = proj.reshape(-1, 2)[0]
+            
+            if 0 <= x < MAP_W_PX and 0 <= y < MAP_H_PX:
+                distance_from_shore = calculate_distance_from_shore(x, y, MAP_W_PX, MAP_H_PX)
+                track['distance_from_shore'] = distance_from_shore
+                track['dangerosity_score'] = calculate_dangerosity_score(track, frame_timestamp, distance_from_shore)
 
     # Show detection boxes and status on main frame
     vis = frame.copy()
@@ -661,11 +672,11 @@ while True:
     underwater_count = len(underwater_tracks)
     danger_count = len(danger_tracks)
     
-    # Calculate max dangerosity and ID
+    # Calculate max dangerosity and ID from ALL tracks (including underwater)
     max_dangerosity = 0
     max_dangerosity_id = None
-    if active_tracks:
-        for track_id, track in active_tracks.items():
+    if tracker.tracks:
+        for track_id, track in tracker.tracks.items():
             if track['dangerosity_score'] > max_dangerosity:
                 max_dangerosity = track['dangerosity_score']
                 max_dangerosity_id = track_id
