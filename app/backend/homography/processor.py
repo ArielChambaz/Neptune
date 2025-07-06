@@ -21,7 +21,7 @@ class HomographyProcessor:
         self.dfine = DFineForObjectDetection.from_pretrained("ustc-community/dfine-xlarge-obj2coco").to(self.device).eval()
         self.DST_RECT = np.array([[0, 0], [self.MAP_W_PX, 0], [self.MAP_W_PX, self.MAP_H_PX], [0, self.MAP_H_PX]], dtype=np.float32)
         self.H_latest: np.ndarray | None = None
-        self.water_bbox = None  # Bounding box for water detection
+        self.water_bbox = None
         self.frame_idx = 0
 
     @torch.inference_mode()
@@ -66,7 +66,7 @@ class HomographyProcessor:
                 cv2.circle(map_canvas, (int(x), int(y)), 4, (255, 255, 255), -1)
             for box, _ in people:
                 x0, y0, x1, y1 = box.astype(int)
-                cv2.rectangle(frame_bgr, (x0, y0), (x1, y1), (255, 0, 0), 2)
+                cv2.rectangle(frame_bgr, (x0, y0), (x1, y1), (0, 255, 0), 2)
 
         if self.water_bbox:
             x, y, w, h = self.water_bbox

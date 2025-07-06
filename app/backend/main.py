@@ -2,9 +2,9 @@ from flask import Flask, Response, jsonify
 from flask_cors import CORS
 import cv2, json, time
 
-from homography.processor import HomographyProcessor   # <- ton wrapper
+from homography.processor import HomographyProcessor
 
-VIDEO_PATH = "assets/input.mov"        # adapte si besoin
+VIDEO_PATH = "assets/input.mov"
 
 app = Flask(__name__)
 CORS(app)
@@ -31,7 +31,6 @@ def video_feed():
 def alerts():
     def event_stream():
         while True:
-            # Ici on simule ; branche tes vraies alertes si tu veux
             alerts = [{
                 "id": time.time(),
                 "type": "red",
@@ -44,7 +43,7 @@ def alerts():
                     mimetype="text/event-stream")
 
 @app.route("/")
-def index():                 # health-check
+def index():
     return "Backend up 👍"
 
 if __name__ == "__main__":

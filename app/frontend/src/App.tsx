@@ -33,12 +33,12 @@ export default function App() {
       </header>
 
       <div className="flex flex-row w-full gap-8 items-stretch">
-        {/* vidéo traitée */}
+        {/* Video */}
         <section className="flex-grow">
           <VideoPlayer />
         </section>
 
-        {/* panneau d’alertes */}
+        {/* Alerts Panel */}
         <aside className="w-[400px] relative">
           <div className="absolute inset-0 flex flex-col gap-4 bg-white/5 p-4 rounded-lg overflow-y-auto">
             <button
