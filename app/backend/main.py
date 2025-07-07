@@ -5,7 +5,7 @@ import cv2, json, time
 from homography.processor import HomographyProcessor
 
 VIDEO_PATH = "assets/input.mov"
-JPEG_QUALITY = 50    
+JPEG_QUALITY = 80    
 
 app = Flask(__name__)
 CORS(app)
