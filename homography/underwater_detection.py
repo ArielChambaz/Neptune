@@ -1,3 +1,4 @@
+from __future__ import annotations
 from pathlib import Path
 import time
 import cv2
@@ -12,8 +13,8 @@ from datetime import datetime
 
 # Config
 DEVICE           = "cuda" if torch.cuda.is_available() else "cpu"
-VIDEO_PATH       = "data/clideo_editor_7fe7e5ff50a443ecb7ec66f86cc8df11.mp4"
-SEG_MODEL_PATH   = "model/nwd-v2.pt"
+VIDEO_PATH       = "homography/data/IMG_6863.MOV"
+SEG_MODEL_PATH   = "water-detection/model-v2/nwd-v2.pt"
 CONF_THRES       = 0.4
 MAP_W_PX, MAP_H_PX = 400, 200
 UPDATE_EVERY     = 300
