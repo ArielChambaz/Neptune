@@ -48,6 +48,26 @@ except ImportError:
     print("⚠️ Fonctionnalités audio non disponibles.")
     HAS_AUDIO = False
 
+# === Configuration avancée ===
+MAP_W_PX, MAP_H_PX = 400, 200
+MIN_WATER_AREA_PX = 5_000
+DANGER_TIME_THRESHOLD = ALERTS['danger_threshold']  # seconds underwater before danger alert
+
+# === Couleurs améliorées pour différents états ===
+SURFACE_COLORS = [
+    (0, 255, 0), (0, 255, 128), (128, 255, 0), (0, 255, 255), (128, 255, 128)
+]
+UNDERWATER_COLORS = [
+    (255, 0, 0), (255, 128, 0), (255, 0, 128), (128, 0, 255), (255, 64, 64)
+]
+DANGER_COLOR = (0, 0, 255)  # Rouge vif pour le danger
+
+# === Configuration des cibles d'homographie ===
+DST_RECT = np.array(
+    [[0, 0], [MAP_W_PX, 0], [MAP_W_PX, MAP_H_PX], [0, MAP_H_PX]],
+    dtype=np.float32,
+)
+
 # PyQt6 imports avec gestion d'erreur
 try:
     from PyQt6.QtWidgets import (
@@ -64,6 +84,245 @@ except ImportError:
     print("❌ PyQt6 non installé. Veuillez installer PyQt6:")
     print("pip install PyQt6")
     sys.exit(1)
+
+# === Fonctions utilitaires améliorées ===
+
+def generate_audio_files():
+    """Générer les fichiers audio à l'avance au démarrage"""
+    if not HAS_AUDIO:
+        return
+        
+    # Créer le répertoire audio si nécessaire
+    audio_dir = "audio_alerts"
+    os.makedirs(audio_dir, exist_ok=True)
+    
+    audio_files = {
+        "danger": "alerte_danger.mp3",
+        "test": "test_alerte.mp3"
+    }
+    
+    messages = {
+        "danger": AUDIO['danger_message'],
+        "test": AUDIO['test_message']
+    }
+    
+    print("🎵 Génération des fichiers audio...")
+    
+    for key, filename in audio_files.items():
+        filepath = os.path.join(audio_dir, filename)
+        
+        # Ignorer si le fichier existe déjà
+        if os.path.exists(filepath):
+            print(f"✅ Fichier déjà existant: {filepath}")
+            continue
+        
+        try:
+            tts = gTTS(text=messages[key], lang=AUDIO['language'], 
+                      slow=AUDIO['slow_speech'], tld=AUDIO['tld'])
+            tts.save(filepath)
+            print(f"💾 Fichier audio généré: {filepath}")
+            
+        except Exception as e:
+            print(f"❌ Erreur lors de la génération de {filename}: {e}")
+    
+    print("🎵 Génération des fichiers audio terminée")
+
+def speak_alert(alert_type="danger"):
+    """Fonction pour jouer les fichiers audio pré-générés"""
+    if not HAS_AUDIO:
+        print(f"📢 ALERTE VOCALE: {alert_type}")
+        return
+        
+    def _speak():
+        try:
+            audio_files = {
+                "danger": "alerte_danger.mp3",
+                "test": "test_alerte.mp3"
+            }
+            
+            filename = audio_files.get(alert_type, audio_files["danger"])
+            filepath = os.path.join("audio_alerts", filename)
+            
+            # Vérifier si le fichier existe
+            if not os.path.exists(filepath):
+                print(f"❌ Fichier audio manquant: {filepath}")
+                print(f"📢 ALERTE VOCALE: {alert_type}")
+                return
+            
+            # Initialiser pygame mixer si pas déjà fait
+            if not pygame.mixer.get_init():
+                pygame.mixer.init(frequency=22050, size=-16, channels=2, buffer=512)
+            
+            # Jouer l'audio pré-généré
+            pygame.mixer.music.load(filepath)
+            pygame.mixer.music.play()
+            
+            print(f"🔊 Lecture du fichier audio: {filename}")
+            
+            # Attendre la fin de la lecture
+            while pygame.mixer.music.get_busy():
+                time.sleep(0.1)
+            
+            # Nettoyer le mixer
+            pygame.mixer.music.unload()
+                
+        except Exception as e:
+            print(f"❌ Erreur lors de la lecture audio: {e}")
+            print(f"📢 ALERTE VOCALE: {alert_type}")
+    
+    # Exécuter le son dans un thread séparé pour ne pas bloquer le programme principal
+    thread = threading.Thread(target=_speak, daemon=True)
+    thread.start()
+
+def calculate_dangerosity_score(track, frame_timestamp, distance_from_shore=0):
+    """
+    Calculer le score de dangerosité de 0 à 100
+    
+    Args:
+        track: Données de tracking de la personne
+        frame_timestamp: Timestamp de la frame actuelle
+        distance_from_shore: Distance depuis la rive (0-1, où 1 est le plus loin)
+    
+    Returns:
+        int: Score de dangerosité (0-100)
+    """
+    score = 0
+
+    # Score de base pour la distance de la rive (toujours applicable)
+    score += int(distance_from_shore * 20)
+
+    # Vérifier si la personne plonge ou est sous l'eau basé sur frames_underwater
+    if track['frames_underwater'] > 0:
+        # La personne plonge ou est sous l'eau - calculer le score progressif
+        
+        # Score de plongée de base (10-30 pts basé sur frames_underwater)
+        diving_progress = min(track['frames_underwater'] / track.get('underwater_threshold', 15), 1.0)
+        score += int(10 + (diving_progress * 20))  # 10-30 pts
+        
+        # Si officiellement sous l'eau, ajouter plus de points
+        if track['status'] == 'underwater':
+            score += 20  # 20 pts supplémentaires pour être officiellement sous l'eau
+            
+            # Facteur temps sous l'eau (0-40 pts)
+            if track['underwater_start_time']:
+                t = frame_timestamp - track['underwater_start_time']
+                if t > DANGER_TIME_THRESHOLD:
+                    score += 40
+                else:
+                    score += int((t / DANGER_TIME_THRESHOLD) * 40)
+        
+        # Facteur excès de frames sous l'eau (0-10 pts)
+        underwater_threshold = track.get('underwater_threshold', 15)
+        if track['frames_underwater'] > underwater_threshold:
+            excess = track['frames_underwater'] - underwater_threshold
+            score += min(10, excess // 10)
+
+    return min(100, score)
+    
+def get_color_by_dangerosity(score):
+    """
+    Obtenir la couleur basée sur le score de dangerosité avec gradient
+    
+    Args:
+        score: Score de dangerosité (0-100)
+    
+    Returns:
+        tuple: Tuple de couleur BGR
+    """
+    if score <= 20:
+        # Gradient vert (vert foncé à vert clair)
+        ratio = score / 20.0
+        b = int(144 * ratio)
+        g = int(100 + (138 * ratio))
+        r = int(144 * ratio)
+        return (b, g, r)
+    
+    elif score <= 40:
+        # Vert clair à jaune
+        ratio = (score - 20) / 20.0
+        b = int(144 * (1 - ratio))
+        g = int(238 + (17 * ratio))
+        r = int(144 + (111 * ratio))
+        return (b, g, r)
+    
+    elif score <= 60:
+        # Jaune à orange
+        ratio = (score - 40) / 20.0
+        b = 0
+        g = int(255 - (90 * ratio))
+        r = 255
+        return (b, g, r)
+    
+    elif score <= 80:
+        # Orange à rouge
+        ratio = (score - 60) / 20.0
+        b = 0
+        g = int(165 * (1 - ratio))
+        r = 255
+        return (b, g, r)
+    
+    else:
+        # Rouge à rouge foncé
+        ratio = (score - 80) / 20.0
+        b = 0
+        g = 0
+        r = int(255 - (116 * ratio))
+        return (b, g, r)
+
+def calculate_distance_from_shore(x, y, map_width, map_height):
+    """
+    Calculer la distance normalisée depuis la rive (0-1)
+    Suppose que la rive est en bas de la carte
+    
+    Args:
+        x, y: Coordonnées de position
+        map_width, map_height: Dimensions de la carte
+    
+    Returns:
+        float: Distance depuis la rive (0-1, où 1 est le plus loin)
+    """
+    # Distance simple depuis le bord inférieur (rive)
+    distance_from_bottom = (map_height - y) / map_height
+    return max(0, min(1, distance_from_bottom))
+
+def get_color_for_track(track_id, status, is_danger=False):
+    """Obtenir la couleur pour une track basée sur son statut"""
+    if is_danger:
+        return DANGER_COLOR
+    elif status == 'underwater':
+        return UNDERWATER_COLORS[track_id % len(UNDERWATER_COLORS)]
+    else:
+        return SURFACE_COLORS[track_id % len(SURFACE_COLORS)]
+
+# === Classe BoxStub pour compatibilité ===
+class BoxStub:
+    def __init__(self, cx, cy, w, h, conf):
+        self.xywh = torch.tensor([[cx, cy, w, h]])
+        self.conf = torch.tensor([conf])
+        self.cls = torch.tensor([0])  # classe 0 = person
+
+# === Système de popup d'alerte ===
+class AlertPopup:
+    def __init__(self, duration=5.0):
+        self.alerts = []  # Liste de (message, timestamp, duration)
+        self.default_duration = duration
+    
+    def add_alert(self, message, duration=None):
+        """Ajouter une nouvelle alerte à afficher"""
+        if duration is None:
+            duration = self.default_duration
+        timestamp = time.time()
+        self.alerts.append((message, timestamp, duration))
+    
+    def update(self):
+        """Supprimer les alertes expirées"""
+        current_time = time.time()
+        self.alerts = [(msg, ts, dur) for msg, ts, dur in self.alerts 
+                      if current_time - ts < dur]
+    
+    def get_active_alerts(self):
+        """Obtenir les alertes actuellement actives"""
+        return [msg for msg, ts, dur in self.alerts]
 
 
 class VideoProcessor(QThread):
@@ -92,10 +351,23 @@ class VideoProcessor(QThread):
         self.underwater_threshold = 15
         self.danger_threshold = 5.0
         
-        # Tracking
+        # Tracking amélioré
         self.tracker = None
         self.H_latest = None
         self.water_mask_global = None
+        self.src_quad_global = None
+        
+        # Système d'alertes
+        self.alert_popup = AlertPopup(duration=7.0)
+        
+        # État de l'eau
+        self.show_water_detection = False
+        
+        # Temps et debug
+        self.frame_timestamp = None
+        self._debug_counter = 0
+        self._model_warning_shown = False
+        self._no_detection_warned = False
         
     def load_models(self):
         """Charger les modèles IA"""
@@ -214,7 +486,7 @@ class VideoProcessor(QThread):
             print(f"❌ Erreur lors de l'analyse de l'eau: {e}")
     
     def detect_persons(self, frame):
-        """Détecter les personnes dans une frame"""
+        """Détecter les personnes dans une frame avec format BoxStub"""
         if self.dfine is None or self.processor is None:
             if not hasattr(self, '_model_warning_shown'):
                 print("⚠️ Modèles D-FINE non chargés - aucune détection possible")
@@ -230,11 +502,12 @@ class VideoProcessor(QThread):
             if self.device == "cuda":
                 inputs["pixel_values"] = inputs["pixel_values"].to(dtype=torch.float16)
             
-            outputs = self.dfine(**inputs)
-            results = self.processor.post_process_object_detection(
-                outputs, target_sizes=[(frame.shape[0], frame.shape[1])], 
-                threshold=self.conf_threshold
-            )[0]
+            with torch.inference_mode():
+                outputs = self.dfine(**inputs)
+                results = self.processor.post_process_object_detection(
+                    outputs, target_sizes=[(frame.shape[0], frame.shape[1])], 
+                    threshold=self.conf_threshold
+                )[0]
             
             persons = []
             for box, label, score in zip(results["boxes"], results["labels"], results["scores"]):
@@ -243,22 +516,19 @@ class VideoProcessor(QThread):
                     cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
                     w, h = x1 - x0, y1 - y0
                     
-                    # Créer un objet simple similaire à BoxStub
-                    person = {
-                        'xywh': [[cx, cy, w, h]],
-                        'conf': [float(score.item())],
-                        'cls': [0],
-                        'bbox': [x0, y0, x1, y1]  # Ajouter aussi la bbox pour debug
-                    }
+                    # Utiliser BoxStub pour la compatibilité
+                    person = BoxStub(cx, cy, w, h, score.item())
                     persons.append(person)
             
             # Debug : afficher le nombre de détections (seulement parfois pour éviter le spam)
-            if len(persons) > 0 and hasattr(self, '_debug_counter'):
+            if len(persons) > 0:
                 self._debug_counter = getattr(self, '_debug_counter', 0) + 1
                 if self._debug_counter % 30 == 0:  # Afficher tous les 30 frames
-                    print(f"Détections trouvées: {len(persons)} personnes avec conf >= {self.conf_threshold}")
+                    print(f"🎯 Détections trouvées: {len(persons)} personnes avec conf >= {self.conf_threshold}")
                     for i, p in enumerate(persons):
-                        print(f"  Personne {i+1}: conf={p['conf'][0]:.3f}, center=({p['xywh'][0][0]:.1f}, {p['xywh'][0][1]:.1f})")
+                        conf = p.conf[0].item()
+                        cx, cy = p.xywh[0][0].item(), p.xywh[0][1].item()
+                        print(f"  Personne {i+1}: conf={conf:.3f}, center=({cx:.1f}, {cy:.1f})")
             elif len(persons) == 0 and not hasattr(self, '_no_detection_warned'):
                 print(f"⚠️ Aucune détection avec seuil {self.conf_threshold}")
                 self._no_detection_warned = True
@@ -267,14 +537,21 @@ class VideoProcessor(QThread):
         except Exception as e:
             print(f"❌ Erreur lors de la détection: {e}")
             return []
+            
+            return persons
+        except Exception as e:
+            print(f"❌ Erreur lors de la détection: {e}")
+            return []
     
     def run(self):
-        """Boucle principale de traitement vidéo"""
+        """Boucle principale de traitement vidéo améliorée"""
         if not self.video_path or not hasattr(self, "cap"):
             return
         
         self.is_running = True
         frame_time = 1.0 / max(self.fps, 1e-6)
+        start_time = time.time()
+        frame_idx = 0
         
         while self.is_running:
             if not self.is_paused:
@@ -284,7 +561,9 @@ class VideoProcessor(QThread):
                     self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     continue
                 
-                start_time = time.time()
+                frame_idx += 1
+                self.current_frame = frame_idx
+                self.frame_timestamp = start_time + (frame_idx / self.fps)
                 
                 # Détecter les personnes
                 persons = self.detect_persons(frame)
@@ -292,64 +571,121 @@ class VideoProcessor(QThread):
                 # Mettre à jour le tracker si disponible
                 stats = {'active': 0, 'underwater': 0, 'danger': 0, 'max_score': 0.0}
                 assignments = {}
+                
                 if self.tracker and persons:
-                    frame_timestamp = time.time()
-                    assignments = self.tracker.update(persons, frame_timestamp)
+                    assignments = self.tracker.update(persons, self.frame_timestamp)
                     
                     # Calculer les statistiques
                     active_tracks = self.tracker.get_active_tracks()
                     underwater_tracks = self.tracker.get_underwater_tracks()
                     danger_tracks = self.tracker.get_danger_tracks()
                     
-                    stats = {
-                        'active': len(active_tracks),
-                        'underwater': len(underwater_tracks),
-                        'danger': len(danger_tracks),
-                        'max_score': max([t.get('dangerosity_score', 0.0) for t in self.tracker.tracks.values()], default=0.0)
-                    }
-                    
-                    # Vérifier les alertes de danger
+                    # === Système d'alerte vocale - Déclencher quand une personne entre en statut danger ===
+                    current_time = time.time()
                     for track_id, track in danger_tracks.items():
                         if not track.get('voice_alert_sent', False):
-                            alert_msg = f"DANGER: Baigneur {track_id} en danger!"
-                            self.alertTriggered.emit(alert_msg)
+                            # Personne vient d'entrer en statut danger - envoyer alerte vocale immédiatement
+                            popup_message = f"DANGER: Baigneur {track_id} en danger!"
+                            
+                            speak_alert("danger")  # Utiliser l'alerte danger pré-générée
+                            self.alert_popup.add_alert(popup_message, duration=8.0)  # 8 secondes pour les alertes de danger
                             track['voice_alert_sent'] = True
-                elif self.tracker:
-                    # Pas de détections mais tracker existe - mettre à jour quand même
-                    frame_timestamp = time.time()
-                    assignments = self.tracker.update([], frame_timestamp)
+                            print(f"🔊 ALERTE VOCALE: Personne {track_id} statut danger - alerte envoyée")
+                            
+                            # Émettre le signal pour l'interface
+                            self.alertTriggered.emit(popup_message)
                     
-                    active_tracks = self.tracker.get_active_tracks()
-                    underwater_tracks = self.tracker.get_underwater_tracks()
-                    danger_tracks = self.tracker.get_danger_tracks()
+                    # Mettre à jour les scores de dangerosité pour toutes les tracks
+                    for track_id, track in self.tracker.tracks.items():
+                        if self.H_latest is not None and track.get('center'):
+                            # Calculer la distance depuis la rive pour les tracks actives
+                            cx, cy = track['center']
+                            center = np.array([[[cx, cy]]], dtype=np.float32)
+                            try:
+                                proj = cv2.perspectiveTransform(center, self.H_latest)
+                                x, y = proj.reshape(-1, 2)[0]
+                                
+                                if 0 <= x < MAP_W_PX and 0 <= y < MAP_H_PX:
+                                    distance_from_shore = calculate_distance_from_shore(x, y, MAP_W_PX, MAP_H_PX)
+                                    track['distance_from_shore'] = distance_from_shore
+                                    track['dangerosity_score'] = calculate_dangerosity_score(track, self.frame_timestamp, distance_from_shore)
+                            except:
+                                pass  # Ignorer les erreurs de transformation
+                    
+                    # Mettre à jour les scores pour les tracks sous l'eau (en utilisant leur dernière position connue)
+                    for track_id, track in self.tracker.tracks.items():
+                        if track_id not in active_tracks and track.get('center'):
+                            # Pour les tracks sous l'eau, utiliser leur dernière position connue
+                            cx, cy = track['center']
+                            center = np.array([[[cx, cy]]], dtype=np.float32)
+                            try:
+                                proj = cv2.perspectiveTransform(center, self.H_latest)
+                                x, y = proj.reshape(-1, 2)[0]
+                                
+                                if 0 <= x < MAP_W_PX and 0 <= y < MAP_H_PX:
+                                    distance_from_shore = calculate_distance_from_shore(x, y, MAP_W_PX, MAP_H_PX)
+                                    track['distance_from_shore'] = distance_from_shore
+                                    track['dangerosity_score'] = calculate_dangerosity_score(track, self.frame_timestamp, distance_from_shore)
+                            except:
+                                pass
+                    
+                    # Calculer les statistiques finales
+                    max_dangerosity = 0
+                    max_dangerosity_id = None
+                    if self.tracker.tracks:
+                        for track_id, track in self.tracker.tracks.items():
+                            score = track.get('dangerosity_score', 0)
+                            if score > max_dangerosity:
+                                max_dangerosity = score
+                                max_dangerosity_id = track_id
                     
                     stats = {
                         'active': len(active_tracks),
                         'underwater': len(underwater_tracks),
                         'danger': len(danger_tracks),
-                        'max_score': max([t.get('dangerosity_score', 0.0) for t in self.tracker.tracks.values()], default=0.0)
+                        'max_score': max_dangerosity
                     }
                 
-                # Dessiner les détections et informations du tracker sur la frame
+                # Mettre à jour le système d'alertes popup
+                self.alert_popup.update()
+                
+                # Dessiner les détections avec les nouvelles fonctionnalités
                 vis_frame = self.draw_detections(frame, persons)
                 
-                # Envoyer la frame et les stats
+                # Émettre les signaux
                 self.frameReady.emit(vis_frame)
                 self.statsReady.emit(stats)
                 
-                self.current_frame += 1
-                
-                # Contrôler la vitesse de lecture
-                elapsed = time.time() - start_time
-                sleep_time = max(0.0, frame_time - elapsed)
-                if sleep_time > 0:
-                    self.msleep(int(sleep_time * 1000))
+                # Contrôle de la vitesse
+                elapsed = time.time() - start_time - (frame_idx / self.fps)
+                if elapsed < frame_time:
+                    time.sleep(frame_time - elapsed)
             else:
-                self.msleep(50)  # Pause
+                time.sleep(0.1)  # Pause
     
     def draw_detections(self, frame, persons):
-        """Dessiner les détections sur la frame avec informations du tracker"""
+        """Dessiner les détections sur la frame avec informations du tracker améliorées"""
         vis_frame = frame.copy()
+        
+        # === Affichage de la zone d'eau et homographie ===
+        if self.show_water_detection:
+            # Afficher le masque d'eau si disponible
+            if self.water_mask_global is not None:
+                # Créer un overlay coloré pour la zone d'eau
+                water_overlay = np.zeros_like(vis_frame)
+                water_overlay[self.water_mask_global > 0] = [255, 100, 0]  # Bleu-orange pour l'eau
+                vis_frame = cv2.addWeighted(vis_frame, 0.8, water_overlay, 0.2, 0)
+            
+            # Dessiner le quadrilatère d'homographie si disponible
+            if self.src_quad_global is not None:
+                quad_points = self.src_quad_global.astype(np.int32)
+                cv2.polylines(vis_frame, [quad_points], True, (0, 255, 0), 3)  # Quadrilatère vert
+                
+                # Ajouter des points aux coins
+                for i, point in enumerate(quad_points):
+                    cv2.circle(vis_frame, tuple(point), 8, (0, 255, 0), -1)
+                    cv2.putText(vis_frame, f"{i+1}", (point[0]+10, point[1]-10), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
         
         # Debug : afficher le nombre de détections reçues
         if len(persons) > 0:
@@ -366,43 +702,10 @@ class VideoProcessor(QThread):
             underwater_tracks = self.tracker.get_underwater_tracks()
             danger_tracks = self.tracker.get_danger_tracks()
         
-        # Fonction utilitaire pour les couleurs basées sur la dangerosité
-        def get_color_by_dangerosity(score):
-            if score <= 20:
-                ratio = score / 20.0
-                b = int(144 * ratio)
-                g = int(100 + (138 * ratio))
-                r = int(144 * ratio)
-                return (b, g, r)
-            elif score <= 40:
-                ratio = (score - 20) / 20.0
-                b = int(144 * (1 - ratio))
-                g = int(238 + (17 * ratio))
-                r = int(144 + (111 * ratio))
-                return (b, g, r)
-            elif score <= 60:
-                ratio = (score - 40) / 20.0
-                b = 0
-                g = int(255 - (90 * ratio))
-                r = 255
-                return (b, g, r)
-            elif score <= 80:
-                ratio = (score - 60) / 20.0
-                b = 0
-                g = int(165 * (1 - ratio))
-                r = 255
-                return (b, g, r)
-            else:
-                ratio = (score - 80) / 20.0
-                b = 0
-                g = 0
-                r = int(255 - (116 * ratio))
-                return (b, g, r)
-        
-        # Dessiner les détections avec les informations du tracker
+        # Dessiner les détections avec les nouvelles fonctionnalités
         for det_idx, person in enumerate(persons):
-            cx, cy, w, h = person['xywh'][0]
-            conf = person['conf'][0]
+            cx, cy, w, h = person.xywh[0]
+            conf = person.conf[0].item()
             
             x0, y0 = int(cx - w/2), int(cy - h/2)
             x1, y1 = int(cx + w/2), int(cy + h/2)
@@ -420,7 +723,6 @@ class VideoProcessor(QThread):
             track_id = None
             track = None
             if self.tracker:
-                active_tracks = self.tracker.get_active_tracks()
                 for tid, t in active_tracks.items():
                     if t.get('center'):
                         tcx, tcy = t['center']
@@ -434,7 +736,6 @@ class VideoProcessor(QThread):
                 # Détection trackée - utiliser les couleurs basées sur la dangerosité
                 score = track.get('dangerosity_score', 0)
                 color = get_color_by_dangerosity(score)
-                danger_tracks = self.tracker.get_danger_tracks() if self.tracker else {}
                 is_danger = track_id in danger_tracks
                 
                 # Redessiner avec la bonne couleur
@@ -458,26 +759,132 @@ class VideoProcessor(QThread):
                 # Redessiner la confiance avec la bonne couleur
                 cv2.putText(vis_frame, conf_text, (x0, y1 + 20),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
-        
+
         # Dessiner les croix de danger pour les personnes en danger
-        for track_id, track in danger_tracks.items():
-            if track.get('dive_point') is not None:
-                dive_x, dive_y = int(track['dive_point'][0]), int(track['dive_point'][1])
-                cv2.drawMarker(
-                    vis_frame,
-                    (dive_x, dive_y),
-                    color=(0, 0, 255),  # Rouge vif
-                    markerType=cv2.MARKER_CROSS,
-                    markerSize=20,
-                    thickness=3
-                )
-        
+        if self.tracker:
+            for track_id, track in danger_tracks.items():
+                if track.get('dive_point') is not None:
+                    dive_x, dive_y = int(track['dive_point'][0]), int(track['dive_point'][1])
+                    cv2.drawMarker(
+                        vis_frame,
+                        (dive_x, dive_y),
+                        color=DANGER_COLOR,  # Rouge vif
+                        markerType=cv2.MARKER_CROSS,
+                        markerSize=20,
+                        thickness=3
+                    )
+
+        # === Création de la minimap avec homographie ===
+        if self.H_latest is not None and self.tracker:
+            map_canvas = np.full((MAP_H_PX, MAP_W_PX, 3), 50, np.uint8)
+            
+            # Dessiner les points de plongée pour toutes les tracks
+            for t_id, t in self.tracker.tracks.items():
+                if t.get('dive_point') is not None:
+                    dp = np.array([[[t['dive_point'][0], t['dive_point'][1]]]], np.float32)
+                    try:
+                        pd = cv2.perspectiveTransform(dp, self.H_latest).reshape(-1, 2)[0]
+                        x_d, y_d = int(pd[0]), int(pd[1])
+                        if 0 <= x_d < MAP_W_PX and 0 <= y_d < MAP_H_PX:
+                            is_dang = t_id in danger_tracks
+                            # Utiliser la couleur de danger (rouge) si la personne est en danger, sinon couleur de dangerosité
+                            if is_dang:
+                                col = DANGER_COLOR  # Rouge vif pour le danger
+                            else:
+                                col = get_color_by_dangerosity(t.get('dangerosity_score', 0))
+                            
+                            cv2.drawMarker(
+                                map_canvas,
+                                (x_d, y_d),
+                                color=col,
+                                markerType=cv2.MARKER_CROSS,
+                                markerSize=10,
+                                thickness=2
+                            )
+                    except:
+                        pass  # Ignorer les erreurs de transformation
+            
+            # Dessiner toutes les tracks actives sur la minimap
+            for track_id, track in active_tracks.items():
+                if track.get('history') and len(track['history']) > 0:
+                    cx, cy = track['history'][-1]  # Position la plus récente
+                    center = np.array([[[cx, cy]]], dtype=np.float32)
+                    try:
+                        proj = cv2.perspectiveTransform(center, self.H_latest)
+                        x, y = proj.reshape(-1, 2)[0]
+
+                        if 0 <= x < MAP_W_PX and 0 <= y < MAP_H_PX:
+                            # Calculer la distance depuis la rive et le score de dangerosité
+                            distance_from_shore = calculate_distance_from_shore(x, y, MAP_W_PX, MAP_H_PX)
+                            track['distance_from_shore'] = distance_from_shore
+                            if hasattr(self, 'frame_timestamp'):
+                                track['dangerosity_score'] = calculate_dangerosity_score(track, self.frame_timestamp, distance_from_shore)
+                            
+                            # Utiliser la couleur basée sur la dangerosité
+                            color = get_color_by_dangerosity(track.get('dangerosity_score', 0))
+                            is_danger = track_id in danger_tracks
+
+                            # Symboles différents pour différents états
+                            if track['status'] == 'underwater':
+                                # Dessiner un cercle plus grand pour sous l'eau
+                                cv2.circle(map_canvas, (int(x), int(y)), 6, color, -1)
+                                if is_danger:
+                                    # Effet de pulsation pour le danger
+                                    pulse_size = 8 + int(2 * math.sin(getattr(self, 'current_frame', 0) * 0.3))
+                                    cv2.circle(map_canvas, (int(x), int(y)), pulse_size, DANGER_COLOR, 2)
+                            else:
+                                # Cercle normal pour la surface
+                                cv2.circle(map_canvas, (int(x), int(y)), 4, color, -1)
+
+                            # Ajouter l'ID et le score de dangerosité
+                            cv2.putText(map_canvas, f"{track_id}({track.get('dangerosity_score', 0)})", 
+                                       (int(x) + 8, int(y) - 8),
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.3, color, 1)
+                    except:
+                        pass  # Ignorer les erreurs de transformation
+
+                # Dessiner l'historique des tracks
+                if track.get('history') and len(track['history']) > 1:
+                    color = get_color_by_dangerosity(track.get('dangerosity_score', 0))
+                    history_points = []
+                    for hist_point in track['history'][-15:]:  # 15 derniers points
+                        center = np.array([[[hist_point[0], hist_point[1]]]], dtype=np.float32)
+                        try:
+                            proj = cv2.perspectiveTransform(center, self.H_latest)
+                            x, y = proj.reshape(-1, 2)[0]
+                            if 0 <= x < MAP_W_PX and 0 <= y < MAP_H_PX:
+                                history_points.append((int(x), int(y)))
+                        except:
+                            pass
+
+                    if len(history_points) > 1:
+                        pts = np.array(history_points, dtype=np.int32)
+                        cv2.polylines(map_canvas, [pts], False, color, 1)
+            
+            # Afficher la minimap dans le coin supérieur droit
+            minimap_h, minimap_w = map_canvas.shape[:2]
+            y_offset = 10
+            x_offset = vis_frame.shape[1] - minimap_w - 10
+            
+            # Ajouter un fond noir pour la minimap
+            cv2.rectangle(vis_frame, (x_offset-5, y_offset-5), 
+                         (x_offset + minimap_w + 5, y_offset + minimap_h + 5), (0, 0, 0), -1)
+            cv2.rectangle(vis_frame, (x_offset-5, y_offset-5), 
+                         (x_offset + minimap_w + 5, y_offset + minimap_h + 5), (255, 255, 255), 2)
+            
+            # Incruster la minimap
+            vis_frame[y_offset:y_offset+minimap_h, x_offset:x_offset+minimap_w] = map_canvas
+            
+            # Titre de la minimap
+            cv2.putText(vis_frame, "MINIMAP", (x_offset, y_offset - 10), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
         # Ajouter des informations générales sur l'image
         info_y = 30
         total_detections = len(persons)
-        total_tracks = len(active_tracks)
-        underwater_count = len(underwater_tracks)
-        danger_count = len(danger_tracks)
+        total_tracks = len(active_tracks) if self.tracker else 0
+        underwater_count = len(underwater_tracks) if self.tracker else 0
+        danger_count = len(danger_tracks) if self.tracker else 0
         
         # Calculer le score max
         max_dangerosity = 0
@@ -491,21 +898,41 @@ class VideoProcessor(QThread):
         
         # Fond semi-transparent pour le texte
         overlay = vis_frame.copy()
-        cv2.rectangle(overlay, (10, 5), (500, 140), (0, 0, 0), -1)
+        cv2.rectangle(overlay, (10, 5), (600, 140), (0, 0, 0), -1)
         cv2.addWeighted(overlay, 0.7, vis_frame, 0.3, 0, vis_frame)
         
-        cv2.putText(vis_frame, f"Detections: {total_detections}", (20, info_y), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-        cv2.putText(vis_frame, f"Tracks actives: {total_tracks}", (20, info_y + 25), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-        cv2.putText(vis_frame, f"Sous l'eau: {underwater_count}", (20, info_y + 50), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
-        cv2.putText(vis_frame, f"En danger: {danger_count}", (20, info_y + 75), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-        cv2.putText(vis_frame, f"Score max: {max_dangerosity} (ID:{max_dangerosity_id})", (20, info_y + 100), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+        # Afficher les informations
+        text_color = (255, 255, 255)
+        cv2.putText(vis_frame, f"Détections: {total_detections}", (20, info_y), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, text_color, 2)
+        info_y += 25
+        cv2.putText(vis_frame, f"Actives: {total_tracks}", (20, info_y), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, text_color, 2)
+        info_y += 25
+        cv2.putText(vis_frame, f"Sous l'eau: {underwater_count}", (20, info_y), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
+        info_y += 25
+        cv2.putText(vis_frame, f"En danger: {danger_count}", (20, info_y), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, DANGER_COLOR, 2)
+        info_y += 25
+        cv2.putText(vis_frame, f"Score max: {max_dangerosity} (ID:{max_dangerosity_id})", (20, info_y), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, text_color, 2)
+        
+        # Afficher les alertes actives
+        if hasattr(self, 'alert_popup'):
+            active_alerts = self.alert_popup.get_active_alerts()
+            if active_alerts:
+                alert_y = vis_frame.shape[0] - 50
+                for alert in active_alerts[-3:]:  # Afficher max 3 alertes
+                    cv2.putText(vis_frame, alert, (20, alert_y), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                    alert_y -= 30
         
         return vis_frame
+    
+    def set_video_path(self, path):
+        """Définir le chemin de la vidéo"""
+        self.video_path = path
     
     def pause(self):
         """Mettre en pause/reprendre"""
@@ -601,10 +1028,11 @@ class NeptuneMainWindow(QMainWindow):
         self.setup_ui()
         self.setup_connections()
         
-        # Initialiser l'audio si disponible
+        # Initialiser l'audio et générer les fichiers si disponible
         if HAS_AUDIO:
             try:
                 pygame.mixer.init()
+                generate_audio_files()  # Générer les fichiers audio au démarrage
             except Exception as e:
                 print(f"⚠️ Audio indisponible: {e}")
         
@@ -720,7 +1148,7 @@ class NeptuneMainWindow(QMainWindow):
         conf_layout.addWidget(QLabel("Seuil confiance:"))
         self.conf_spinbox = QDoubleSpinBox()
         self.conf_spinbox.setRange(0.1, 1.0)
-        self.conf_spinbox.setValue(0.55)
+        self.conf_spinbox.setValue(0.3)  # Seuil plus bas pour voir plus de détections
         self.conf_spinbox.setSingleStep(0.05)
         self.conf_spinbox.valueChanged.connect(self.update_confidence)
         conf_layout.addWidget(self.conf_spinbox)
@@ -738,6 +1166,20 @@ class NeptuneMainWindow(QMainWindow):
         
         config_group.setLayout(config_layout)
         control_layout.addWidget(config_group)
+        
+        # === Contrôles d'affichage ===
+        display_group = QGroupBox("Affichage")
+        display_layout = QVBoxLayout()
+        
+        # Bouton pour basculer l'affichage de la détection d'eau
+        self.toggle_water_btn = QPushButton("🌊 Afficher Détection Eau")
+        self.toggle_water_btn.setCheckable(True)
+        self.toggle_water_btn.setChecked(False)
+        self.toggle_water_btn.clicked.connect(self.toggle_water_detection)
+        display_layout.addWidget(self.toggle_water_btn)
+        
+        display_group.setLayout(display_layout)
+        control_layout.addWidget(display_group)
         
         # === Journal des alertes ===
         alerts_group = QGroupBox("Journal des Alertes")
@@ -790,6 +1232,10 @@ class NeptuneMainWindow(QMainWindow):
         self.video_processor.frameReady.connect(self.update_frame)
         self.video_processor.statsReady.connect(self.update_stats)
         self.video_processor.alertTriggered.connect(self.handle_alert)
+        
+        # Initialiser les valeurs par défaut
+        self.video_processor.conf_threshold = 0.3
+        self.video_processor.danger_threshold = 5.0
     
     def select_video(self):
         """Sélectionner un fichier vidéo - Version sécurisée"""
@@ -993,9 +1439,18 @@ class NeptuneMainWindow(QMainWindow):
         threading.Thread(target=_play_alert, daemon=True).start()
     
     def test_voice_alert(self):
-        """Tester l'alerte vocale"""
-        test_message = "Test de l'alerte vocale. Système de surveillance aquatique opérationnel."
+        """Tester l'alerte vocale avec le nouveau système"""
+        speak_alert("test")  # Utiliser l'alerte test pré-générée
+        test_message = "🔊 Test d'alerte vocale déclenché"
         self.handle_alert(test_message)
+        print("🔊 Test d'alerte vocale déclenché")
+    
+    def toggle_water_detection(self, checked):
+        """Basculer l'affichage de la détection d'eau"""
+        self.video_processor.show_water_detection = checked
+        text = "🌊 Masquer Détection Eau" if checked else "🌊 Afficher Détection Eau"
+        self.toggle_water_btn.setText(text)
+        print(f"Affichage détection d'eau: {'ON' if checked else 'OFF'}")
     
     def update_confidence(self, value):
         """Mettre à jour le seuil de confiance"""
@@ -1017,6 +1472,9 @@ class NeptuneMainWindow(QMainWindow):
 
 def main():
     """Fonction principale"""
+    # Générer les fichiers audio au démarrage
+    generate_audio_files()
+    
     app = QApplication(sys.argv)
     
     # Configuration de l'application
