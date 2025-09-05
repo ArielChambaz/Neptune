@@ -455,17 +455,34 @@ class NeptuneMainWindow(QMainWindow):
         print(f"[UI] Eau: {'ON' if checked else 'OFF'}")
     
     def recalculate_water_zone(self):
-        """Recalcule la zone d'eau"""
+        """Recalcule la zone d'eau de manière thread-safe"""
         print("[UI] Recalcul zone d'eau…")
         
-        if self.video_processor.recalculate_water_detection():
-            self.btn_toggle_water.setChecked(True)
-            self.toggle_water_detection(True)
-            self.statusBar().showMessage("Zone d'eau recalculée !", 3000)
-            self.handle_alert("Zone d'eau recalculée")
-        else:
-            self.statusBar().showMessage("Échec recalcul zone d'eau", 3000)
-            self.handle_alert("Échec recalcul zone d'eau")
+        # Désactiver le bouton pendant l'opération
+        self.btn_recalc_water.setEnabled(False)
+        self.btn_recalc_water.setText("Recalcul en cours...")
+        
+        # Forcer le traitement des événements UI
+        QApplication.processEvents()
+        
+        try:
+            if self.video_processor.recalculate_water_detection():
+                self.btn_toggle_water.setChecked(True)
+                self.toggle_water_detection(True)
+                self.statusBar().showMessage("Zone d'eau recalculée !", 3000)
+                self.handle_alert("Zone d'eau recalculée")
+            else:
+                self.statusBar().showMessage("Échec recalcul zone d'eau", 3000)
+                self.handle_alert("Échec recalcul zone d'eau")
+        
+        except Exception as e:
+            print(f"[UI] Erreur recalcul: {e}")
+            self.statusBar().showMessage(f"Erreur: {e}", 3000)
+        
+        finally:
+            # Réactiver le bouton
+            self.btn_recalc_water.setEnabled(True)
+            self.btn_recalc_water.setText("Recalculer Zone d'Eau")
     
     def update_confidence(self, value):
         """Met à jour le seuil de confiance"""
@@ -490,10 +507,16 @@ class NeptuneMainWindow(QMainWindow):
             super().keyPressEvent(event)
     
     def closeEvent(self, event):
-        """Gère la fermeture de l'application"""
+        """Gère la fermeture de l'application de manière sécurisée"""
+        print("[UI] Fermeture de l'application...")
+        
         try:
             if self.video_processor.isRunning():
+                print("[UI] Arrêt du processeur vidéo...")
                 self.video_processor.stop()
-        except Exception:
-            pass
+                print("[UI] Processeur vidéo arrêté")
+        except Exception as e:
+            print(f"[UI] Erreur lors de l'arrêt: {e}")
+        
+        print("[UI] Fermeture terminée")
         event.accept()

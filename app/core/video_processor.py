@@ -8,6 +8,7 @@ Neptune Video Processor
 import cv2
 import time
 import numpy as np
+import threading
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from config_pyqt6 import DETECTION, ALERTS
@@ -37,6 +38,9 @@ class VideoProcessor(QThread):
         self.current_frame = 0
         self.total_frames = 0
         self.fps = 30
+        
+        # Mutex pour la protection thread-safe
+        self._lock = threading.Lock()
         
         # Configuration
         self.conf_threshold = DETECTION['conf_threshold']
@@ -110,6 +114,7 @@ class VideoProcessor(QThread):
     def recalculate_water_detection(self) -> bool:
         """
         Recalcule la détection d'eau sur la frame actuelle
+        Sans interrompre la lecture vidéo
         
         Returns:
             bool: True si le recalcul réussit
@@ -118,20 +123,36 @@ class VideoProcessor(QThread):
             print("Aucune vidéo chargée")
             return False
         
-        pos = self.cap.get(cv2.CAP_PROP_POS_FRAMES)
-        ok, frame = self.cap.read()
-        
-        if not ok:
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, pos)
+        # On utilise une nouvelle capture temporaire pour éviter les conflits
+        try:
+            temp_cap = cv2.VideoCapture(self.video_path)
+            if not temp_cap.isOpened():
+                print("[Water] Impossible d'ouvrir la vidéo temporaire")
+                return False
+            
+            # Se positionner à la frame actuelle (ou proche)
+            current_frame = getattr(self, 'current_frame', 0)
+            temp_cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, current_frame - 1))
+            
+            ok, frame = temp_cap.read()
+            temp_cap.release()  # Libérer immédiatement
+            
+            if not ok:
+                print("[Water] Impossible de lire la frame pour recalcul")
+                return False
+            
+            # Recalculer l'homographie avec la frame obtenue
+            ok2 = self.water_detector.compute_water_and_homography(frame, self.model_manager.nwsd)
+            
+            if ok2:
+                self.show_water_detection = True
+                print("[Water] Zone d'eau recalculée avec succès (sans interruption)")
+            
+            return ok2
+            
+        except Exception as e:
+            print(f"[Water] Erreur lors du recalcul: {e}")
             return False
-        
-        ok2 = self.water_detector.compute_water_and_homography(frame, self.model_manager.nwsd)
-        self.cap.set(cv2.CAP_PROP_POS_FRAMES, pos)
-        
-        if ok2:
-            self.show_water_detection = True
-        
-        return ok2
     
     def run(self):
         """Boucle principale de traitement vidéo"""
@@ -427,11 +448,22 @@ class VideoProcessor(QThread):
         self.is_paused = not self.is_paused
     
     def stop(self):
-        """Arrête le traitement vidéo"""
+        """Arrête le traitement vidéo de manière sécurisée"""
+        print("[VideoProcessor] Arrêt demandé...")
         self.is_running = False
-        if hasattr(self, 'cap'):
+        
+        # Attendre que le thread se termine proprement
+        if self.isRunning():
+            self.wait(2000)  # Attendre max 2 secondes
+            
+        # Libérer les ressources vidéo
+        if hasattr(self, 'cap') and self.cap is not None:
             try:
-                self.cap.release()
-            except Exception:
-                pass
-        self.wait()
+                with self._lock:
+                    self.cap.release()
+                    self.cap = None
+                print("[VideoProcessor] Ressources vidéo libérées")
+            except Exception as e:
+                print(f"[VideoProcessor] Erreur libération: {e}")
+        
+        print("[VideoProcessor] Arrêt terminé")
