@@ -26,7 +26,7 @@ class NeptuneMainWindow(QMainWindow):
     
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Neptune - Surveillance Aquatique PyQt6 (Factorisé)")
+        self.setWindowTitle("Neptune")
         self.setGeometry(100, 100, UI['width'], UI['height'])
         
         # Style de l'interface
