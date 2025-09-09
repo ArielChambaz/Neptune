@@ -8,6 +8,7 @@ Neptune Detection Models
 
 import torch
 from pathlib import Path
+import sys
 
 # ===== Dépendances IA (optionnelles) =====
 try:
@@ -98,14 +99,34 @@ class ModelManager:
     
     def _load_water_detection_model(self):
         """Charge le modèle de détection d'eau"""
-        mp = Path("model/nwd-v2.pt")
-        if not mp.exists():
-            mp = Path("demo/Demo-5/model/nwd-v2.pt")
-        
-        if mp.exists():
-            self.nwsd = YOLO(str(mp))
+        # Candidate locations (prefer the app/ path used in packaging)
+        candidates = [
+            Path("app/model/nwd-v2.pt"),
+            Path("model/nwd-v2.pt"),
+        ]
+
+        # If running from a PyInstaller bundle, check the _MEIPASS dir first
+        if getattr(sys, "frozen", False):
+            meipass = Path(getattr(sys, "_MEIPASS", ""))
+            if meipass:
+                candidates.insert(0, meipass / "app" / "model" / "nwd-v2.pt")
+                candidates.insert(0, meipass / "model" / "nwd-v2.pt")
+
+        mp = None
+        for p in candidates:
+            if p.exists():
+                mp = p
+                break
+
+        if mp is not None:
+            try:
+                self.nwsd = YOLO(str(mp))
+            except Exception as e:
+                print(f"[Models] Erreur chargement modèle d'eau: {e}")
+                self.nwsd = None
         else:
-            print("[Models] Modèle de détection d'eau non trouvé")
+            searched = ", ".join(str(p) for p in candidates)
+            print(f"[Models] Modèle de détection d'eau non trouvé. Chemins vérifiés: {searched}")
     
     def _load_person_detection_model(self):
         """Charge le modèle de détection de personnes"""
