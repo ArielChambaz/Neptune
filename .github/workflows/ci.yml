@@ -1,4 +1,4 @@
-name: CI + Allure (PR previews on gh-pages)
+name: CI + Allure + Vercel previews
 
 on:
   pull_request:
@@ -7,9 +7,7 @@ on:
     branches: ["dev", "main"]
 
 permissions:
-  contents: write
-  pages: write
-  id-token: write
+  contents: read
 
 env:
   PROJECT_DIR: water-detection/CI
@@ -18,41 +16,25 @@ env:
 
 jobs:
   test:
-    name: Test NWSD + Build Allure
     runs-on: ubuntu-latest
-
+    outputs:
+      allure-dir: ${{ steps.pack.outputs.dir }}
     steps:
-      - name: Checkout (with LFS)
-        uses: actions/checkout@v4
-        with:
-          lfs: true
+      - uses: actions/checkout@v4
+        with: { lfs: true }
+      - run: git lfs pull
 
-      - name: Pull LFS
-        run: |
-          git lfs install
-          git lfs pull
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
 
-      - name: Debug tree
-        run: |
-          echo "Workspace: $GITHUB_WORKSPACE"
-          ls -la
-          echo "----"
-          ls -la water-detection || true
-          test -d "$PROJECT_DIR" || (echo "❌ $PROJECT_DIR introuvable"; exit 1)
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install deps (Torch CPU + reqs + Allure plugin)
+      - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision torchaudio
           pip install -r "$PROJECT_DIR/requirements.txt"
           pip install allure-pytest
 
-      - name: Run tests (Allure results)
+      - name: Run pytest (Allure)
         working-directory: ${{ env.PROJECT_DIR }}
         run: pytest --alluredir=allure-results
 
@@ -63,52 +45,81 @@ jobs:
           curl -sL -o allure.zip "https://github.com/allure-framework/allure2/releases/download/${ALLURE_VERSION}/allure-${ALLURE_VERSION}.zip"
           sudo unzip -q allure.zip -d /opt/
           sudo ln -sf "/opt/allure-${ALLURE_VERSION}/bin/allure" /usr/local/bin/allure
-          allure --version
 
       - name: Build Allure HTML
-        if: ${{ always() }}
         working-directory: ${{ env.PROJECT_DIR }}
         run: allure generate allure-results -o allure-report --clean
 
-      - name: Upload Allure report as artifact (optional)
+      - uses: actions/upload-artifact@v4
         if: ${{ always() }}
-        uses: actions/upload-artifact@v4
         with:
           name: allure-report
           path: ${{ env.PROJECT_DIR }}/allure-report
 
-  deploy:
-    name: Publish Allure to gh-pages
+  vercel:
     needs: test
     runs-on: ubuntu-latest
-
+    env:
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Download Allure HTML built by 'test'
+      - name: Download built Allure HTML
         uses: actions/download-artifact@v4
         with:
           name: allure-report
-          path: ./_site
+          path: ./allure-report
 
-      - name: Publish (PR preview subfolder)
+      - name: Install Vercel CLI
+        run: npm i -g vercel@latest
+
+      - name: Deploy preview to Vercel
         if: github.event_name == 'pull_request'
-        uses: peaceiris/actions-gh-pages@v3
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_branch: gh-pages
-          publish_dir: ./_site
-          destination_dir: pr-${{ github.event.pull_request.number }}
-          keep_files: true
-          commit_message: "Allure PR #${{ github.event.pull_request.number }}"
+        id: vercel_preview
+        run: |
+          # crée un preview deployment et récupère l'URL
+          url=$(vercel deploy ./allure-report \
+            --token "$VERCEL_TOKEN" \
+            --scope "$VERCEL_ORG_ID" \
+            --project "$VERCEL_PROJECT_ID" \
+            --yes --prebuilt --name allure-pr-${{ github.event.pull_request.number }})
+          echo "url=$url" >> $GITHUB_OUTPUT
+          echo "Preview URL: $url"
 
-      - name: Publish (main → root)
-        if: github.ref == 'refs/heads/main' && needs.test.result == 'success'
-        uses: peaceiris/actions-gh-pages@v3
+      - name: Deploy production to Vercel
+        if: github.ref == 'refs/heads/main'
+        id: vercel_prod
+        run: |
+          url=$(vercel deploy ./allure-report \
+            --token "$VERCEL_TOKEN" \
+            --scope "$VERCEL_ORG_ID" \
+            --project "$VERCEL_PROJECT_ID" \
+            --yes --prebuilt --prod --name allure-main)
+          echo "url=$url" >> $GITHUB_OUTPUT
+          echo "Prod URL: $url"
+
+  comment:
+    needs: vercel
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_branch: gh-pages
-          publish_dir: ./_site
-          keep_files: true
-          commit_message: "Allure main build"
+          script: |
+            const pr = context.payload.pull_request;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            // récupère la sortie du job 'vercel'
+            const url = '${{ needs.vercel.outputs.url }}' || 'N/A';
+            const marker = '<!-- allure-vercel -->';
+            const body = `${marker}\n🔎 Allure preview (Vercel): ${url}\n`;
+
+            const { data: comments } = await github.rest.issues.listComments({ owner, repo, issue_number: pr.number, per_page: 100 });
+            const existing = comments.find(c => c.user.type === 'Bot' && c.body?.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number: pr.number, body });
+            }
