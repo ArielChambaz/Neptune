@@ -63,6 +63,28 @@ jobs:
           sudo ln -sf "/opt/allure-${ALLURE_VERSION}/bin/allure" /usr/local/bin/allure
           allure --version
 
+      - name: Download previous Allure report artifact (main)
+        if: github.ref == 'refs/heads/main'
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: ci-vercel.yml
+          workflow_conclusion: success
+          branch: main
+          name: allure-report
+          path: ./_prev-allure-report
+          if_no_artifact_found: ignore
+
+      - name: Seed Allure history (if available)
+        if: github.ref == 'refs/heads/main'
+        run: |
+          if [ -d "_prev-allure-report/history" ]; then
+            mkdir -p "${PROJECT_DIR}/allure-results/history"
+            cp -r _prev-allure-report/history "${PROJECT_DIR}/allure-results/"
+            echo "Seeded history from previous run."
+          else
+            echo "No previous history found (first run on main?)."
+          fi
+
       - name: Build Allure HTML
         if: ${{ always() }}
         working-directory: ${{ env.PROJECT_DIR }}

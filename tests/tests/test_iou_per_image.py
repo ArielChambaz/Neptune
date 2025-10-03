@@ -55,8 +55,9 @@ def _overlay(img_rgb: Image.Image, gt01: np.ndarray, pred01: np.ndarray) -> Imag
     pairs,
     ids=[Path(img).stem for img, _ in pairs],
 )
-@allure.feature("Water Segmentation")
+@allure.feature("NWSD Model")
 @allure.story("Per-image IoU ≥ 0.80")
+@allure.suite("NWSD Tests")
 def test_iou_per_image(img_path, msk_path):
     img = Image.open(img_path).convert("RGB")
     gt  = Image.open(msk_path).convert("L")
