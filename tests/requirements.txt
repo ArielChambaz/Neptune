@@ -4,3 +4,8 @@ pillow
 pytest
 allure-pytest
 opencv-python
+torch==2.*
+torchvision==0.*
+transformers>=4.40.0
+huggingface-hub>=0.23
+safetensors>=0.4
