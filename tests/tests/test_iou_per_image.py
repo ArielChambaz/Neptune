@@ -5,11 +5,11 @@ from PIL import Image
 import pytest
 import allure
 
-from model.yolo_infer import predict_mask
+from nwsd.model.yolo_infer import predict_mask
 
 ROOT = Path(__file__).resolve().parents[1]
-IMG_DIR = ROOT / "images"
-MSK_DIR = ROOT / "masks"
+IMG_DIR = ROOT / "nwsd/images"
+MSK_DIR = ROOT / "nwsd/masks"
 
 IOU_THRESHOLD = 0.80
 
@@ -55,8 +55,9 @@ def _overlay(img_rgb: Image.Image, gt01: np.ndarray, pred01: np.ndarray) -> Imag
     pairs,
     ids=[Path(img).stem for img, _ in pairs],
 )
-@allure.feature("Water Segmentation")
+@allure.feature("NWSD Model")
 @allure.story("Per-image IoU ≥ 0.80")
+@allure.suite("NWSD Tests")
 def test_iou_per_image(img_path, msk_path):
     img = Image.open(img_path).convert("RGB")
     gt  = Image.open(msk_path).convert("L")
