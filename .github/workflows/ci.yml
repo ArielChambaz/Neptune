@@ -54,6 +54,10 @@ jobs:
 
       - name: Run tests (Allure results)
         working-directory: ${{ env.PROJECT_DIR }}
+        env:
+          DET_IOU_THR: "0.50"
+          DET_CONF_THR: "0.25"
+          DET_MIN_MAP50: "0.30"
         run: pytest --alluredir=allure-results
 
       - name: Install Allure CLI
@@ -65,7 +69,6 @@ jobs:
           sudo ln -sf "/opt/allure-${ALLURE_VERSION}/bin/allure" /usr/local/bin/allure
           allure --version
 
-      # === Fetch + seed Allure history depuis la branche dédiée ===
       - name: Fetch previous history branch
         if: github.ref == 'refs/heads/main'
         run: |
@@ -95,7 +98,6 @@ jobs:
         working-directory: ${{ env.PROJECT_DIR }}
         run: allure generate allure-results -o allure-report --clean
 
-      # === Publie le nouvel historique dans allure-history ===
       - name: Publish new history to branch
         if: github.ref == 'refs/heads/main'
         run: |
