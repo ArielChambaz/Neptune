@@ -15,3 +15,6 @@ demo/Demo-2/video
 demo/Demo-3/video
 demo/Demo-4/video
 demo/Demo-5/video
+app/video
+app/clean_pycache.py
+app/__pycache__
