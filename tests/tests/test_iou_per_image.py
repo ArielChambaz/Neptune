@@ -5,7 +5,7 @@ from PIL import Image
 import pytest
 import allure
 
-from model.yolo_infer import predict_mask
+from nwsd.model.yolo_infer import predict_mask
 
 ROOT = Path(__file__).resolve().parents[1]
 IMG_DIR = ROOT / "nwsd/images"
