@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  # Backend API
+  neptune-backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: neptune-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+      - DEVICE=cpu  # Changer en 'cuda' si GPU disponible
+      - CONF_THRESHOLD=0.5
+    volumes:
+      - ./backend/models:/app/models
+      - ./app/model:/app/model
+    command: python start_backend.py
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Optional: Frontend (future)
+  # neptune-frontend:
+  #   build:
+  #     context: .
+  #     dockerfile: frontend/Dockerfile
+  #   container_name: neptune-frontend
+  #   ports:
+  #     - "3000:3000"
+  #   depends_on:
+  #     - neptune-backend
+  #   environment:
+  #     - REACT_APP_API_URL=http://neptune-backend:8000
+  #   restart: unless-stopped
+
+volumes:
+  models:
+  data:

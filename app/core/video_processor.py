@@ -9,9 +9,12 @@ import cv2
 import time
 import numpy as np
 import threading
+import logging
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from config_pyqt6 import DETECTION, ALERTS
+from api_config import BACKEND_URL, API_REQUEST_TIMEOUT
+from api_client import get_api_client
 from core.constants import MAP_W_PX, MAP_H_PX
 from core.tracker import UnderwaterPersonTracker
 from detection.models import ModelManager
@@ -19,6 +22,8 @@ from detection.water import WaterDetector
 from utils.alerts import AlertPopup
 from utils.danger import calculate_distance_from_shore
 from utils.audio import speak_alert
+
+logger = logging.getLogger(__name__)
 
 
 class VideoProcessor(QThread):
@@ -47,7 +52,21 @@ class VideoProcessor(QThread):
         self.underwater_threshold = DETECTION['underwater_threshold']
         self.danger_threshold = ALERTS['danger_threshold']
         
-        # Composants principaux
+        # Client API Backend (optionnel, fallback sur traitement local)
+        try:
+            self.api_client = get_api_client(BACKEND_URL)
+            self.use_api = self.api_client.health_check()
+            if self.use_api:
+                logger.info(f"✓ Backend API connecté: {BACKEND_URL}")
+            else:
+                logger.warning(f"✗ Backend API non réactif, fallback traitement local")
+                self.use_api = False
+        except Exception as e:
+            logger.warning(f"API Client error: {e}, using local processing")
+            self.use_api = False
+            self.api_client = None
+        
+        # Composants principaux (pour fallback local)
         self.model_manager = ModelManager()
         self.water_detector = WaterDetector()
         self.tracker = None
@@ -61,12 +80,17 @@ class VideoProcessor(QThread):
         
     def load_models(self):
         """
-        Charge les modèles IA
+        Charge les modèles IA (via API backend si disponible)
         
         Returns:
             bool: True si le chargement réussit
         """
-        return self.model_manager.load_models()
+        if self.use_api:
+            logger.info("Utilisation de l'API Backend pour la détection")
+            return True
+        else:
+            logger.info("Chargement des modèles en local")
+            return self.model_manager.load_models()
     
     def load_video(self, path):
         """
@@ -164,6 +188,127 @@ class VideoProcessor(QThread):
         frame_idx = 0
         frame_time = 1.0 / max(self.fps, 1e-6)
         
+        # Sélectionner la méthode de traitement
+        if self.use_api:
+            logger.info("Utilisation API Backend pour traitement")
+            self._run_with_api(start_time, frame_idx, frame_time)
+        else:
+            logger.info("Traitement local (sans API)")
+            self._run_local(start_time, frame_idx, frame_time)
+    
+    def _run_with_api(self, start_time, frame_idx, frame_time):
+        """Traitement vidéo via API Backend"""
+        while self.is_running:
+            if self.is_paused:
+                time.sleep(0.1)
+                continue
+            
+            ok, frame = self.cap.read()
+            if not ok:
+                self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                continue
+            
+            frame_idx += 1
+            self.current_frame = frame_idx
+            self.frame_timestamp = start_time + (frame_idx / self.fps)
+            
+            try:
+                # Appel API pour détection
+                result = self.api_client.detect_frame_from_file(
+                    frame,
+                    detect_persons=True,
+                    detect_water=self.show_water_detection
+                )
+                
+                if result is None:
+                    # Erreur API, afficher la frame sans traitement
+                    logger.warning("API detection failed, showing raw frame")
+                    self.frameReady.emit(frame)
+                    self.statsReady.emit({
+                        'active': 0, 'underwater': 0, 'danger': 0,
+                        'max_score': 0, 'max_score_id': None
+                    })
+                    time.sleep(frame_time)
+                    continue
+                
+                # Traiter les résultats de l'API
+                persons_api = result.get('persons', [])
+                water_region = result.get('water_region')
+                
+                # Initialiser le tracker si nécessaire
+                if self.tracker is None:
+                    self.tracker = UnderwaterPersonTracker(
+                        max_distance=DETECTION['max_distance'],
+                        max_disappeared=DETECTION['max_disappeared']
+                    )
+                
+                # Convertir résultats API en format local
+                persons = self._convert_api_detections(persons_api)
+                
+                # Update tracker
+                assignments = self.tracker.update(persons, self.frame_timestamp)
+                
+                # Récupération des tracks
+                active_tracks = self.tracker.get_active_tracks()
+                underwater_tracks = self.tracker.get_underwater_tracks()
+                danger_tracks = self.tracker.get_danger_tracks(now=self.frame_timestamp)
+                
+                # Gestion des alertes
+                self._handle_danger_alerts(danger_tracks)
+                
+                # Création de la minimap
+                map_canvas = self._create_minimap(active_tracks, danger_tracks, frame_idx)
+                
+                # Mise à jour des distances
+                self._update_tracks_positions(active_tracks)
+                self._update_inactive_tracks_positions()
+                
+                # Force une mise à jour des scores
+                self.tracker._update_dangerosity_scores(self.frame_timestamp)
+                
+                # Création de la frame finale
+                vis = self._draw_overlays(frame, persons, assignments, active_tracks,
+                                        underwater_tracks, danger_tracks, map_canvas)
+                
+                # Statistiques
+                all_tracks = self.tracker.get_all_tracks()
+                max_score = 0
+                max_score_id = None
+                
+                for tid, track in all_tracks.items():
+                    score = track.get('dangerosity_score', 0)
+                    if score > max_score:
+                        max_score = score
+                        max_score_id = tid
+                
+                stats = {
+                    'active': len(active_tracks),
+                    'underwater': len(underwater_tracks),
+                    'danger': len(danger_tracks),
+                    'max_score': max_score,
+                    'max_score_id': max_score_id,
+                }
+                
+                # Émission des signaux
+                self.frameReady.emit(vis)
+                self.statsReady.emit(stats)
+                
+                # Contrôle du timing
+                elapsed = time.time() - start_time - (frame_idx / self.fps)
+                if elapsed < frame_time:
+                    time.sleep(frame_time - elapsed)
+            
+            except Exception as e:
+                logger.error(f"Error in API processing: {e}")
+                # Fallback: afficher frame brute
+                self.frameReady.emit(frame)
+                self.statsReady.emit({
+                    'active': 0, 'underwater': 0, 'danger': 0,
+                    'max_score': 0, 'max_score_id': None
+                })
+    
+    def _run_local(self, start_time, frame_idx, frame_time):
+        """Traitement vidéo en local (fallback)"""
         while self.is_running:
             if self.is_paused:
                 time.sleep(0.1)
@@ -185,7 +330,7 @@ class VideoProcessor(QThread):
                 time.sleep(frame_time)
                 continue
             
-            # Détection et tracking
+            # Détection et tracking (local)
             persons = self.model_manager.detect_persons(frame, self.conf_threshold)
             assignments = self.tracker.update(persons, self.frame_timestamp)
             
@@ -238,6 +383,21 @@ class VideoProcessor(QThread):
             elapsed = time.time() - start_time - (frame_idx / self.fps)
             if elapsed < frame_time:
                 time.sleep(frame_time - elapsed)
+    
+    def _convert_api_detections(self, persons_api):
+        """Convertit les résultats API en format BoxStub local"""
+        class BoxStub:
+            def __init__(self, cx, cy, w, h, conf):
+                import torch
+                self.xywh = torch.tensor([[cx, cy, w, h]])
+                self.conf = torch.tensor([conf])
+                self.cls = torch.tensor([0])
+        
+        persons = []
+        for p in persons_api:
+            box = BoxStub(p['x'], p['y'], p['width'], p['height'], p['confidence'])
+            persons.append(box)
+        return persons
     
     def _handle_danger_alerts(self, danger_tracks):
         """Gère les alertes de danger"""
