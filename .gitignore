@@ -17,4 +17,5 @@ demo/Demo-4/video
 demo/Demo-5/video
 app/video
 app/clean_pycache.py
-app/__pycache__
+app/__pycache__app-api/venv/
+*/venv
