@@ -1,23 +1,20 @@
-name: Mirror main to private repo
+name: Mirror to private repo
 
 on:
   push:
-    branches:
-      - main
+    branches: [ main ]
 
 jobs:
-  mirror:
+  mirroring:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout full repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Push to private repo
-        run: |
-          git remote add private "$PRIVATE_REPO"
-          git push private main --force
-        env:
-          PRIVATE_REPO: ${{ secrets.PRIVATE_REPO }}
+      - name: Mirror to private repo
+        uses: pixta-dev/repository-mirroring-action@v1
+        with:
+          target_repo_url: git@github.com:EpitechPromo2026/G-EIP-700-REN-7-1-eip-adrien.picot
+          ssh_private_key: ${{ secrets.SSH_PRIVATE_KEY }}
