@@ -14,17 +14,19 @@ API = {
 }
 
 # === Configuration des couleurs ===
+# Updated to match the new STYLESHEET in app/ui/styles.py
+# Format: (R, G, B) for use with OpenCV or other libs requiring tuples
 COLORS = {
-    'bg_dark': (45, 45, 45),
-    'bg_light': (70, 70, 70),
-    'primary': (0, 80, 243),
-    'success': (0, 255, 0),
-    'warning': (0, 255, 255),
-    'danger': (0, 0, 255),
+    'bg_dark': (18, 18, 18),    # Matches #121212
+    'bg_light': (30, 30, 30),   # Matches #1E1E1E
+    'primary': (0, 122, 255),   # Matches #007AFF (Blue)
+    'success': (52, 199, 89),   # Matches #34C759 (Green)
+    'warning': (255, 149, 0),   # Matches #FF9500 (Orange)
+    'danger': (255, 59, 48),    # Matches #FF3B30 (Red)
     'text_white': (255, 255, 255),
-    'text_gray': (200, 200, 200),
-    'border': (100, 100, 100),
-    'water_zone': (0, 255, 0),
+    'text_gray': (160, 160, 160),
+    'border': (58, 58, 58),
+    'water_zone': (0, 212, 255), # Matches #00D4FF (Cyan)
 }
 
 # === Configuration de la détection ===
