@@ -508,6 +508,23 @@ class VideoProcessor(QThread):
             thickness = 4 if is_danger else 2
             cv2.rectangle(vis, (x0, y0), (x1, y1), color, thickness)
             
+            # Draw Red Cross if Danger
+            if is_danger:
+                # Draw Red Cross (X) at center
+                cross_color = (0, 0, 255) # Red
+                cross_size = 20
+                cross_thickness = 3
+
+                center_x, center_y = int(cx), int(cy)
+
+                # Line 1: Top-Left to Bottom-Right
+                cv2.line(vis, (center_x - cross_size, center_y - cross_size),
+                         (center_x + cross_size, center_y + cross_size), cross_color, cross_thickness)
+
+                # Line 2: Top-Right to Bottom-Left
+                cv2.line(vis, (center_x + cross_size, center_y - cross_size),
+                         (center_x - cross_size, center_y + cross_size), cross_color, cross_thickness)
+
             # Label
             track_id = det['track_id']
             if status == 'underwater':
