@@ -126,7 +126,7 @@ class NeptuneMainWindow(QMainWindow):
         controls_layout.addWidget(self.btn_toggle_water)
 
         layout.addWidget(controls_bar)
-        
+
         return container
 
     def _create_sidebar(self):
@@ -139,7 +139,7 @@ class NeptuneMainWindow(QMainWindow):
         layout = QVBoxLayout(content)
         layout.setContentsMargins(5, 0, 5, 0)
         layout.setSpacing(20)
-        
+
         # 1. Source Selection
         source_group = QGroupBox("VIDEO SOURCE")
         source_layout = QVBoxLayout(source_group)
@@ -166,25 +166,41 @@ class NeptuneMainWindow(QMainWindow):
         stats_layout = QGridLayout(stats_group)
         
         # Active
-        stats_layout.addWidget(QLabel("ACTIVE TRACKS", property="stat-label"), 0, 0)
-        self.lbl_active = QLabel("0", property="stat-value")
+        lbl_active_title = QLabel("ACTIVE TRACKS")
+        lbl_active_title.setProperty("class", "stat-label")
+        stats_layout.addWidget(lbl_active_title, 0, 0)
+
+        self.lbl_active = QLabel("0")
+        self.lbl_active.setProperty("class", "stat-value")
         stats_layout.addWidget(self.lbl_active, 1, 0)
         
         # Underwater
-        stats_layout.addWidget(QLabel("UNDERWATER", property="stat-label"), 0, 1)
-        self.lbl_underwater = QLabel("0", property="stat-value")
+        lbl_underwater_title = QLabel("UNDERWATER")
+        lbl_underwater_title.setProperty("class", "stat-label")
+        stats_layout.addWidget(lbl_underwater_title, 0, 1)
+
+        self.lbl_underwater = QLabel("0")
+        self.lbl_underwater.setProperty("class", "stat-value")
         self.lbl_underwater.setStyleSheet("color: #FF9500;") # Warning color
         stats_layout.addWidget(self.lbl_underwater, 1, 1)
         
         # Danger
-        stats_layout.addWidget(QLabel("DANGER", property="stat-label"), 2, 0)
-        self.lbl_danger = QLabel("0", property="stat-value")
+        lbl_danger_title = QLabel("DANGER")
+        lbl_danger_title.setProperty("class", "stat-label")
+        stats_layout.addWidget(lbl_danger_title, 2, 0)
+
+        self.lbl_danger = QLabel("0")
+        self.lbl_danger.setProperty("class", "stat-value")
         self.lbl_danger.setStyleSheet("color: #FF3B30;") # Danger color
         stats_layout.addWidget(self.lbl_danger, 3, 0)
         
         # Max Score
-        stats_layout.addWidget(QLabel("MAX RISK", property="stat-label"), 2, 1)
-        self.lbl_max_score = QLabel("0.0", property="stat-value")
+        lbl_max_score_title = QLabel("MAX RISK")
+        lbl_max_score_title.setProperty("class", "stat-label")
+        stats_layout.addWidget(lbl_max_score_title, 2, 1)
+
+        self.lbl_max_score = QLabel("0.0")
+        self.lbl_max_score.setProperty("class", "stat-value")
         stats_layout.addWidget(self.lbl_max_score, 3, 1)
 
         layout.addWidget(stats_group)
