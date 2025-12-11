@@ -11,7 +11,7 @@ from datetime import datetime
 
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-    QLabel, QTextEdit, QGroupBox, QGridLayout, QDoubleSpinBox, 
+    QLabel, QTextEdit, QGroupBox, QGridLayout, QDoubleSpinBox, QSpinBox,
     QSplitter, QLineEdit, QApplication, QFrame, QScrollArea, QSizePolicy
 )
 from PyQt6.QtCore import Qt, QSize
@@ -74,11 +74,10 @@ class NeptuneMainWindow(QMainWindow):
         
         # Video Display (Frame)
         self.video_frame = QFrame()
-        self.video_frame.setStyleSheet("background-color: #000; border-radius: 8px; border: 1px solid #333;")
-        self.video_frame.setFrameShape(QFrame.Shape.StyledPanel)
+        self.video_frame.setObjectName("VideoFrame") # For styling
         
         video_layout = QVBoxLayout(self.video_frame)
-        video_layout.setContentsMargins(0, 0, 0, 0)
+        video_layout.setContentsMargins(1, 1, 1, 1) # Thin border inside
         
         self.video_label = QLabel()
         self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -101,7 +100,7 @@ class NeptuneMainWindow(QMainWindow):
         self.play_btn = QPushButton("▶")
         self.play_btn.setFixedSize(40, 40)
         self.play_btn.setProperty("class", "icon-btn")
-        self.play_btn.setToolTip("Play/Pause")
+        self.play_btn.setToolTip("Play/Pause (Space)")
         self.play_btn.setEnabled(False)
         self.play_btn.clicked.connect(self.toggle_playback)
         controls_layout.addWidget(self.play_btn)
@@ -206,9 +205,9 @@ class NeptuneMainWindow(QMainWindow):
         layout.addWidget(stats_group)
 
         # 3. Detection Settings
-        settings_group = QGroupBox("DETECTION SETTINGS")
+        settings_group = QGroupBox("SETTINGS")
         settings_layout = QVBoxLayout(settings_group)
-        
+
         # Confidence
         row1 = QHBoxLayout()
         row1.addWidget(QLabel("Confidence:"))
@@ -229,6 +228,17 @@ class NeptuneMainWindow(QMainWindow):
         self.danger_spin.valueChanged.connect(self.update_danger_threshold)
         row2.addWidget(self.danger_spin)
         settings_layout.addLayout(row2)
+
+        # Skip Frames
+        row3 = QHBoxLayout()
+        row3.addWidget(QLabel("Skip Frames:"))
+        self.skip_frames_spin = QSpinBox()
+        self.skip_frames_spin.setRange(1, 30)
+        self.skip_frames_spin.setValue(self.video_processor.skip_frames)
+        self.skip_frames_spin.setSingleStep(1)
+        self.skip_frames_spin.valueChanged.connect(self.update_skip_frames)
+        row3.addWidget(self.skip_frames_spin)
+        settings_layout.addLayout(row3)
         
         recalc_btn = QPushButton("Recalculate Water Zone")
         recalc_btn.clicked.connect(self.recalculate_water_zone)
@@ -290,7 +300,12 @@ class NeptuneMainWindow(QMainWindow):
             pass
         
         # Création d'un nouveau processor
+        # IMPORTANT: Preserve current settings
+        current_skip = self.skip_frames_spin.value()
+
         self.video_processor = VideoProcessor()
+        self.video_processor.skip_frames = current_skip
+
         self._connect_signals()
         
         # Chargement des modèles IA
@@ -432,6 +447,10 @@ class NeptuneMainWindow(QMainWindow):
     def update_danger_threshold(self, value):
         """Met à jour le seuil de danger"""
         self.video_processor.danger_threshold = float(value)
+
+    def update_skip_frames(self, value):
+        """Updates the skip frames setting"""
+        self.video_processor.skip_frames = value
     
     # === Gestion des événements ===
     

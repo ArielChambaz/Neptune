@@ -176,7 +176,7 @@ class VideoProcessor(QThread):
         self.ws_url = f"{API['ws_url']}/stream/realtime"
         self.jpeg_quality = API['jpeg_quality']
         self.fps_target = API['fps_target']
-        self.skip_frames = API['skip_frames']
+        self._skip_frames = API['skip_frames']
 
         # Interface
         self.show_water_detection = False
@@ -195,6 +195,14 @@ class VideoProcessor(QThread):
         # Frame buffer for synchronization
         self.pending_frames = {}
         self.max_pending_frames = 10
+
+    @property
+    def skip_frames(self):
+        return self._skip_frames
+
+    @skip_frames.setter
+    def skip_frames(self, value):
+        self._skip_frames = int(value)
 
     def load_models(self):
         """
