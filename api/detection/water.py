@@ -8,6 +8,7 @@ Neptune Water Detection and Homography
 
 import cv2
 import numpy as np
+import time
 from core.constants import MIN_WATER_AREA_PX, DST_RECT
 
 
@@ -35,7 +36,14 @@ class WaterDetector:
         
         try:
             # Segmentation de l'eau
+            t0 = time.time()
             seg = nwsd_model.predict(frame, imgsz=512, task="segment", conf=0.25, verbose=False)[0]
+            t1 = time.time()
+
+            dt_ms = (t1 - t0) * 1000
+            fps = 1000.0 / dt_ms if dt_ms > 0 else 0.0
+            print(f"[INFERENCE NWSD] Temps: {dt_ms:.0f} ms/image | FPS: {fps:.1f}")
+
             if seg.masks is None:
                 return False
             

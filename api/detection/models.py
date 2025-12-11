@@ -7,6 +7,7 @@ Neptune Detection Models (API version with GPU optimization)
 import torch
 from pathlib import Path
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -198,7 +199,15 @@ class ModelManager:
                 self._model_warning_shown = True
             return []
         
-        return detect_persons_dfine(frame, self.processor, self.dfine, self.device, conf_threshold)
+        t0 = time.time()
+        results = detect_persons_dfine(frame, self.processor, self.dfine, self.device, conf_threshold)
+        t1 = time.time()
+
+        dt_ms = (t1 - t0) * 1000
+        fps = 1000.0 / dt_ms if dt_ms > 0 else 0.0
+        print(f"[INFERENCE NHD] Temps: {dt_ms:.0f} ms/image | FPS: {fps:.1f}")
+
+        return results
     
     def has_water_model(self):
         """Check if water model is available"""
