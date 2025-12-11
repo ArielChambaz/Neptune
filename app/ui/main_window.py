@@ -302,9 +302,13 @@ class NeptuneMainWindow(QMainWindow):
         # Création d'un nouveau processor
         # IMPORTANT: Preserve current settings
         current_skip = self.skip_frames_spin.value()
+        current_conf = self.conf_spin.value()
+        current_danger = self.danger_spin.value()
 
         self.video_processor = VideoProcessor()
         self.video_processor.skip_frames = current_skip
+        self.video_processor.conf_threshold = current_conf
+        self.video_processor.danger_threshold = current_danger
 
         self._connect_signals()
         
