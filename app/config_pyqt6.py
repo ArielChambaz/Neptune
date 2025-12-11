@@ -2,32 +2,42 @@
 Configuration pour l'application Neptune PyQt6
 """
 
+import os
+
+# === Configuration API ===
+API = {
+    'base_url': os.getenv("API_BASE_URL", "http://localhost:8000/api/v1"),
+    'ws_url': os.getenv("WS_BASE_URL", "ws://localhost:8000/api/v1"),
+    'fps_target': 15,
+    'jpeg_quality': 75,
+    'skip_frames': 2,
+}
+
 # === Configuration des couleurs ===
+# Updated to match the new STYLESHEET in app/ui/styles.py
+# Format: (R, G, B) for use with OpenCV or other libs requiring tuples
 COLORS = {
-    'bg_dark': (45, 45, 45),
-    'bg_light': (70, 70, 70),
-    'primary': (0, 80, 243),
-    'success': (0, 255, 0),
-    'warning': (0, 255, 255),
-    'danger': (0, 0, 255),
+    'bg_dark': (18, 18, 18),    # Matches #121212
+    'bg_light': (30, 30, 30),   # Matches #1E1E1E
+    'primary': (0, 122, 255),   # Matches #007AFF (Blue)
+    'success': (52, 199, 89),   # Matches #34C759 (Green)
+    'warning': (255, 149, 0),   # Matches #FF9500 (Orange)
+    'danger': (255, 59, 48),    # Matches #FF3B30 (Red)
     'text_white': (255, 255, 255),
-    'text_gray': (200, 200, 200),
-    'border': (100, 100, 100),
-    'water_zone': (0, 255, 0),
+    'text_gray': (160, 160, 160),
+    'border': (58, 58, 58),
+    'water_zone': (0, 212, 255), # Matches #00D4FF (Cyan)
 }
 
 # === Configuration de la détection ===
 DETECTION = {
-    'conf_threshold': 0.7,      # Seuil de confiance pour la détection (MÊME QUE DEMO-5)
-    'max_distance': 100,         # Distance maximale pour l'association des tracks
-    'max_disappeared': 300,      # Frames avant suppression d'un track  
-    'underwater_threshold': 5,   # Frames pour considérer une personne sous l'eau (RÉDUIT POUR TEST)
-    'surface_threshold': 3,      # Frames pour considérer une personne en surface (RÉDUIT POUR TEST)
+    'conf_threshold': 0.7,      # Seuil de confiance pour la détection
+    'underwater_threshold': 5,   # Frames pour considérer une personne sous l'eau
 }
 
 # === Configuration des alertes ===
 ALERTS = {
-    'danger_threshold': 5,       # Seuil de danger (secondes sous l'eau) - MÊME QUE DEMO-5
+    'danger_threshold': 5.0,       # Seuil de danger (secondes sous l'eau)
     'alert_duration': 8.0,       # Durée d'affichage des alertes (secondes)
     'popup_duration': 7.0,       # Durée du popup d'alerte
 }

@@ -3,6 +3,7 @@
 """
 Neptune Main Window
 - Interface utilisateur principale
+- Design System: Modern / Professional / Dark Theme
 """
 
 from pathlib import Path
@@ -10,13 +11,14 @@ from datetime import datetime
 
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-    QLabel, QTextEdit, QGroupBox, QGridLayout, QDoubleSpinBox, 
-    QSplitter, QLineEdit, QApplication
+    QLabel, QTextEdit, QGroupBox, QGridLayout, QDoubleSpinBox, QSpinBox,
+    QSplitter, QLineEdit, QApplication, QFrame, QScrollArea, QSizePolicy
 )
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QPixmap, QImage
+from PyQt6.QtCore import Qt, QSize
+from PyQt6.QtGui import QPixmap, QImage, QIcon
 
 from config_pyqt6 import DETECTION, ALERTS, UI
+from ui.styles import STYLESHEET
 from core.video_processor import VideoProcessor
 from utils.audio import speak_alert, initialize_audio
 
@@ -26,11 +28,11 @@ class NeptuneMainWindow(QMainWindow):
     
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Neptune")
+        self.setWindowTitle("Neptune - Aquatic Surveillance")
         self.setGeometry(100, 100, UI['width'], UI['height'])
         
         # Style de l'interface
-        self.setStyleSheet(self._get_stylesheet())
+        self.setStyleSheet(STYLESHEET)
         
         # Composants principaux
         self.video_processor = VideoProcessor()
@@ -43,262 +45,227 @@ class NeptuneMainWindow(QMainWindow):
         # Initialisation audio
         initialize_audio()
     
-    def _get_stylesheet(self):
-        """Retourne le style CSS de l'interface"""
-        return """
-            QMainWindow { background:#2b2b2b; color:#fff; }
-            QGroupBox { 
-                font-weight:bold; 
-                border:2px solid #555; 
-                border-radius:8px; 
-                margin-top:10px; 
-                padding-top:10px; 
-                background:#3b3b3b; 
-            }
-            QGroupBox::title { 
-                left:10px; 
-                padding:0 10px; 
-                color:#00D4FF; 
-            }
-            QPushButton { 
-                background:#4CAF50; 
-                border:none; 
-                color:white; 
-                padding:10px; 
-                border-radius:5px; 
-                font-weight:bold; 
-            }
-            QPushButton:hover { background:#45a049; }
-            QPushButton:pressed { background:#3d8b40; }
-            QPushButton:disabled { background:#666; color:#999; }
-            QLabel { color:#fff; }
-            QTextEdit { 
-                background:#1e1e1e; 
-                border:1px solid #555; 
-                color:#fff; 
-                border-radius:5px; 
-            }
-        """
-    
     def _build_ui(self):
         """Construit l'interface utilisateur"""
         central = QWidget()
         self.setCentralWidget(central)
+
+        # Main Horizontal Layout
         main_layout = QHBoxLayout(central)
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        main_layout.addWidget(splitter)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.setSpacing(10)
         
-        # Panel gauche (contrôles)
-        left_panel = self._create_control_panel()
-        splitter.addWidget(left_panel)
+        # === Left: Video Area ===
+        video_area = self._create_video_area()
+        main_layout.addWidget(video_area, stretch=3) # Takes 75% space approx
         
-        # Panel droit (vidéo)
-        right_panel = self._create_video_panel()
-        splitter.addWidget(right_panel)
+        # === Right: Sidebar Controls ===
+        sidebar = self._create_sidebar()
+        main_layout.addWidget(sidebar, stretch=1) # Takes 25% space approx
         
-        self.statusBar().showMessage("Prêt - Saisissez un chemin de vidéo")
-    
-    def _create_control_panel(self):
-        """Crée le panel de contrôle gauche"""
-        left = QWidget()
-        left.setMaximumWidth(UI['control_panel_width'])
-        left.setMinimumWidth(300)
-        layout = QVBoxLayout(left)
+        self.statusBar().showMessage("Ready - Select a video source")
+
+    def _create_video_area(self):
+        """Area containing Video Player and Playback Controls"""
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
         
-        # Section fichier
-        layout.addWidget(self._create_file_section())
+        # Video Display (Frame)
+        self.video_frame = QFrame()
+        self.video_frame.setObjectName("VideoFrame") # For styling
         
-        # Section lecture
-        layout.addWidget(self._create_playback_section())
+        video_layout = QVBoxLayout(self.video_frame)
+        video_layout.setContentsMargins(1, 1, 1, 1) # Thin border inside
         
-        # Section statistiques
-        layout.addWidget(self._create_stats_section())
-        
-        # Section configuration
-        layout.addWidget(self._create_config_section())
-        
-        # Section affichage
-        layout.addWidget(self._create_display_section())
-        
-        # Section alertes
-        layout.addWidget(self._create_alerts_section())
-        
-        layout.addStretch()
-        return left
-    
-    def _create_file_section(self):
-        """Crée la section de sélection de fichier"""
-        group = QGroupBox("Fichier Vidéo")
-        layout = QVBoxLayout(group)
-        
-        # Bouton désactivé (informatif)
-        self.select_video_btn = QPushButton("Sélectionner une vidéo (DÉSACTIVÉ)")
-        self.select_video_btn.setEnabled(False)
-        self.select_video_btn.setToolTip("Utilisez le champ de texte ci-dessous")
-        layout.addWidget(self.select_video_btn)
-        
-        # Label et champ de saisie
-        label = QLabel("Chemin complet de la vidéo :")
-        label.setStyleSheet("color:#FFD700; font-weight:bold;")
-        layout.addWidget(label)
-        
-        # Ligne de saisie + bouton charger
-        row = QHBoxLayout()
-        self.path_input = QLineEdit()
-        self.path_input.setText("/home/achambaz/neptune/G-EIP-700-REN-7-1-eip-adrien.picot/app/video/rozel-15fps-fullhd.mp4")
-        self.path_input.setPlaceholderText("Ex: /path/to/video.mp4")
-        row.addWidget(self.path_input)
-        
-        btn_load = QPushButton("Charger")
-        btn_load.clicked.connect(self.load_video_from_path)
-        row.addWidget(btn_load)
-        layout.addLayout(row)
-        
-        # Label du fichier sélectionné
-        self.video_path_label = QLabel("Aucune vidéo sélectionnée")
-        self.video_path_label.setWordWrap(True)
-        self.video_path_label.setStyleSheet("color:#999;")
-        layout.addWidget(self.video_path_label)
-        
-        return group
-    
-    def _create_playback_section(self):
-        """Crée la section de contrôle de lecture"""
-        group = QGroupBox("Lecture")
-        layout = QVBoxLayout(group)
-        
-        row = QHBoxLayout()
-        
-        self.play_btn = QPushButton("Lecture")
+        self.video_label = QLabel()
+        self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.video_label.setText("NO VIDEO SIGNAL\n\nLoad a source to start surveillance")
+        self.video_label.setStyleSheet("color: #666; font-weight: bold;")
+        self.video_label.setScaledContents(True)
+        self.video_label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored)
+
+        video_layout.addWidget(self.video_label)
+        layout.addWidget(self.video_frame, stretch=1)
+
+        # Playback Controls Bar
+        controls_bar = QWidget()
+        controls_bar.setFixedHeight(60)
+        controls_bar.setStyleSheet("background-color: #1E1E1E; border-radius: 8px;")
+        controls_layout = QHBoxLayout(controls_bar)
+        controls_layout.setContentsMargins(15, 5, 15, 5)
+
+        # Play/Pause
+        self.play_btn = QPushButton("▶")
+        self.play_btn.setFixedSize(40, 40)
+        self.play_btn.setProperty("class", "icon-btn")
+        self.play_btn.setToolTip("Play/Pause (Space)")
         self.play_btn.setEnabled(False)
         self.play_btn.clicked.connect(self.toggle_playback)
-        row.addWidget(self.play_btn)
+        controls_layout.addWidget(self.play_btn)
         
-        self.stop_btn = QPushButton("Arrêt")
+        # Stop
+        self.stop_btn = QPushButton("⏹")
+        self.stop_btn.setFixedSize(40, 40)
+        self.stop_btn.setProperty("class", "icon-btn")
+        self.stop_btn.setToolTip("Stop")
         self.stop_btn.setEnabled(False)
         self.stop_btn.clicked.connect(self.stop_playback)
-        row.addWidget(self.stop_btn)
+        controls_layout.addWidget(self.stop_btn)
+
+        controls_layout.addStretch()
+
+        # Water Toggle (Quick Access)
+        self.btn_toggle_water = QPushButton("🌊 Water Zone")
+        self.btn_toggle_water.setCheckable(True)
+        self.btn_toggle_water.setChecked(False)
+        self.btn_toggle_water.clicked.connect(self.toggle_water_detection)
+        self.btn_toggle_water.setToolTip("Toggle Water Zone Overlay (W)")
+        controls_layout.addWidget(self.btn_toggle_water)
+
+        layout.addWidget(controls_bar)
+
+        return container
+
+    def _create_sidebar(self):
+        """Right sidebar with configuration and stats"""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(5, 0, 5, 0)
+        layout.setSpacing(20)
+
+        # 1. Source Selection
+        source_group = QGroupBox("VIDEO SOURCE")
+        source_layout = QVBoxLayout(source_group)
         
-        layout.addLayout(row)
-        return group
-    
-    def _create_stats_section(self):
-        """Crée la section des statistiques"""
-        group = QGroupBox("Stats temps réel")
-        layout = QGridLayout(group)
+        self.path_input = QLineEdit()
+        self.path_input.setPlaceholderText("/path/to/video.mp4")
+        self.path_input.setText("/home/achambaz/neptune/G-EIP-700-REN-7-1-eip-adrien.picot/app/video/rozel-15fps-fullhd.mp4")
+        source_layout.addWidget(self.path_input)
         
-        self.stats_labels = {
-            'active': QLabel("0"),
-            'underwater': QLabel("0"),
-            'danger': QLabel("0"),
-            'max_score': QLabel("0")
-        }
+        load_btn = QPushButton("LOAD SOURCE")
+        load_btn.setProperty("class", "primary")
+        load_btn.clicked.connect(self.load_video_from_path)
+        source_layout.addWidget(load_btn)
         
-        labels_titles = {
-            "active": "Actifs",
-            "underwater": "Sous l'eau",
-            "danger": "En danger",
-            "max_score": "Score max"
-        }
+        self.video_path_label = QLabel("No source loaded")
+        self.video_path_label.setStyleSheet("color: #666; font-size: 11px;")
+        self.video_path_label.setWordWrap(True)
+        source_layout.addWidget(self.video_path_label)
         
-        for i, (key, label) in enumerate(self.stats_labels.items()):
-            label.setStyleSheet("font-size:14px; font-weight:bold;")
-            layout.addWidget(QLabel(labels_titles[key] + ":"), i, 0)
-            layout.addWidget(label, i, 1)
+        layout.addWidget(source_group)
         
-        return group
-    
-    def _create_config_section(self):
-        """Crée la section de configuration"""
-        group = QGroupBox("Configuration")
-        layout = QVBoxLayout(group)
+        # 2. Live Stats
+        stats_group = QGroupBox("LIVE MONITORING")
+        stats_layout = QGridLayout(stats_group)
         
-        # Seuil de confiance
+        # Active
+        lbl_active_title = QLabel("ACTIVE TRACKS")
+        lbl_active_title.setProperty("class", "stat-label")
+        stats_layout.addWidget(lbl_active_title, 0, 0)
+
+        self.lbl_active = QLabel("0")
+        self.lbl_active.setProperty("class", "stat-value")
+        stats_layout.addWidget(self.lbl_active, 1, 0)
+        
+        # Underwater
+        lbl_underwater_title = QLabel("UNDERWATER")
+        lbl_underwater_title.setProperty("class", "stat-label")
+        stats_layout.addWidget(lbl_underwater_title, 0, 1)
+
+        self.lbl_underwater = QLabel("0")
+        self.lbl_underwater.setProperty("class", "stat-value")
+        self.lbl_underwater.setStyleSheet("color: #FF9500;") # Warning color
+        stats_layout.addWidget(self.lbl_underwater, 1, 1)
+        
+        # Danger
+        lbl_danger_title = QLabel("DANGER")
+        lbl_danger_title.setProperty("class", "stat-label")
+        stats_layout.addWidget(lbl_danger_title, 2, 0)
+
+        self.lbl_danger = QLabel("0")
+        self.lbl_danger.setProperty("class", "stat-value")
+        self.lbl_danger.setStyleSheet("color: #FF3B30;") # Danger color
+        stats_layout.addWidget(self.lbl_danger, 3, 0)
+        
+        # Max Score
+        lbl_max_score_title = QLabel("MAX RISK")
+        lbl_max_score_title.setProperty("class", "stat-label")
+        stats_layout.addWidget(lbl_max_score_title, 2, 1)
+
+        self.lbl_max_score = QLabel("0.0")
+        self.lbl_max_score.setProperty("class", "stat-value")
+        stats_layout.addWidget(self.lbl_max_score, 3, 1)
+
+        layout.addWidget(stats_group)
+
+        # 3. Detection Settings
+        settings_group = QGroupBox("SETTINGS")
+        settings_layout = QVBoxLayout(settings_group)
+
+        # Confidence
         row1 = QHBoxLayout()
-        row1.addWidget(QLabel("Seuil confiance:"))
-        
+        row1.addWidget(QLabel("Confidence:"))
         self.conf_spin = QDoubleSpinBox()
         self.conf_spin.setRange(0.1, 1.0)
         self.conf_spin.setValue(DETECTION['conf_threshold'])
         self.conf_spin.setSingleStep(0.05)
         self.conf_spin.valueChanged.connect(self.update_confidence)
         row1.addWidget(self.conf_spin)
-        layout.addLayout(row1)
+        settings_layout.addLayout(row1)
         
-        # Seuil de danger
+        # Danger Threshold
         row2 = QHBoxLayout()
-        row2.addWidget(QLabel("Seuil danger (s):"))
-        
+        row2.addWidget(QLabel("Danger Time (s):"))
         self.danger_spin = QDoubleSpinBox()
         self.danger_spin.setRange(1.0, 30.0)
         self.danger_spin.setValue(ALERTS['danger_threshold'])
         self.danger_spin.valueChanged.connect(self.update_danger_threshold)
         row2.addWidget(self.danger_spin)
-        layout.addLayout(row2)
+        settings_layout.addLayout(row2)
+
+        # Skip Frames
+        row3 = QHBoxLayout()
+        row3.addWidget(QLabel("Skip Frames:"))
+        self.skip_frames_spin = QSpinBox()
+        self.skip_frames_spin.setRange(1, 30)
+        self.skip_frames_spin.setValue(self.video_processor.skip_frames)
+        self.skip_frames_spin.setSingleStep(1)
+        self.skip_frames_spin.valueChanged.connect(self.update_skip_frames)
+        row3.addWidget(self.skip_frames_spin)
+        settings_layout.addLayout(row3)
         
-        return group
-    
-    def _create_display_section(self):
-        """Crée la section d'affichage"""
-        group = QGroupBox("Affichage")
-        layout = QVBoxLayout(group)
+        recalc_btn = QPushButton("Recalculate Water Zone")
+        recalc_btn.clicked.connect(self.recalculate_water_zone)
+        settings_layout.addWidget(recalc_btn)
         
-        # Toggle détection d'eau
-        self.btn_toggle_water = QPushButton("Afficher Détection Eau")
-        self.btn_toggle_water.setCheckable(True)
-        self.btn_toggle_water.setChecked(False)
-        self.btn_toggle_water.clicked.connect(self.toggle_water_detection)
-        layout.addWidget(self.btn_toggle_water)
+        layout.addWidget(settings_group)
         
-        # Recalcul zone d'eau
-        self.btn_recalc_water = QPushButton("Recalculer Zone d'Eau")
-        self.btn_recalc_water.setToolTip("Raccourci: R")
-        self.btn_recalc_water.clicked.connect(self.recalculate_water_zone)
-        layout.addWidget(self.btn_recalc_water)
+        # 4. Alerts Log
+        alerts_group = QGroupBox("ALERTS LOG")
+        alerts_layout = QVBoxLayout(alerts_group)
         
-        return group
-    
-    def _create_alerts_section(self):
-        """Crée la section des alertes"""
-        group = QGroupBox("Journal des Alertes")
-        layout = QVBoxLayout(group)
-        
-        # Zone de texte des alertes
         self.alerts_text = QTextEdit()
         self.alerts_text.setMaximumHeight(150)
         self.alerts_text.setReadOnly(True)
-        layout.addWidget(self.alerts_text)
+        alerts_layout.addWidget(self.alerts_text)
         
-        # Bouton test alerte
-        self.test_alert_btn = QPushButton("Test Alerte Vocale")
-        self.test_alert_btn.clicked.connect(self.test_voice_alert)
-        layout.addWidget(self.test_alert_btn)
+        test_alert_btn = QPushButton("Test Voice Alert")
+        test_alert_btn.setProperty("class", "danger")
+        test_alert_btn.clicked.connect(self.test_voice_alert)
+        alerts_layout.addWidget(test_alert_btn)
         
-        return group
-    
-    def _create_video_panel(self):
-        """Crée le panel d'affichage vidéo"""
-        right = QWidget()
-        layout = QVBoxLayout(right)
+        layout.addWidget(alerts_group)
         
-        self.video_label = QLabel()
-        self.video_label.setMinimumSize(
-            UI['video_panel_min_width'], 
-            UI['video_panel_min_height']
-        )
-        self.video_label.setStyleSheet(
-            "QLabel { border:2px solid #555; border-radius:8px; "
-            "background:#1e1e1e; color:#999; }"
-        )
-        self.video_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.video_label.setText(
-            "Aucune vidéo chargée\\n\\nSélectionnez une vidéo pour commencer"
-        )
-        self.video_label.setScaledContents(True)
-        
-        layout.addWidget(self.video_label)
-        return right
-    
+        layout.addStretch()
+        scroll.setWidget(content)
+        return scroll
+
     def _connect_signals(self):
         """Connecte les signaux du video processor"""
         self.video_processor.frameReady.connect(self.update_frame)
@@ -333,27 +300,36 @@ class NeptuneMainWindow(QMainWindow):
             pass
         
         # Création d'un nouveau processor
+        # IMPORTANT: Preserve current settings
+        current_skip = self.skip_frames_spin.value()
+        current_conf = self.conf_spin.value()
+        current_danger = self.danger_spin.value()
+
         self.video_processor = VideoProcessor()
+        self.video_processor.skip_frames = current_skip
+        self.video_processor.conf_threshold = current_conf
+        self.video_processor.danger_threshold = current_danger
+
         self._connect_signals()
         
         # Chargement des modèles IA
-        self.statusBar().showMessage("Chargement des modèles IA…")
+        self.statusBar().showMessage("Loading AI models...")
         QApplication.processEvents()
         ok = self.video_processor.load_models()
-        status_msg = "Modèles IA chargés" if ok else "Erreur chargement modèles"
+        status_msg = "AI Models Ready" if ok else "Error loading models"
         self.statusBar().showMessage(status_msg)
         
         # Chargement de la vidéo
-        self.statusBar().showMessage("Chargement vidéo…")
+        self.statusBar().showMessage("Loading video...")
         QApplication.processEvents()
         
         if self.video_processor.load_video(path):
             self.play_btn.setEnabled(True)
             self.stop_btn.setEnabled(True)
-            self.statusBar().showMessage("Vidéo chargée – Lecture prête")
+            self.statusBar().showMessage("Source Loaded - Ready to Play")
             self.video_label.setText("")
         else:
-            self.statusBar().showMessage("Erreur chargement vidéo")
+            self.statusBar().showMessage("Error loading video source")
     
     def toggle_playback(self):
         """Bascule entre lecture et pause"""
@@ -364,13 +340,13 @@ class NeptuneMainWindow(QMainWindow):
                 self.video_processor.is_paused = False
             
             self.is_playing = True
-            self.play_btn.setText("Pause")
-            self.statusBar().showMessage("Lecture…")
+            self.play_btn.setText("⏸")
+            self.statusBar().showMessage("Monitoring Active")
         else:
             self.video_processor.is_paused = True
             self.is_playing = False
-            self.play_btn.setText("Lecture")
-            self.statusBar().showMessage("En pause")
+            self.play_btn.setText("▶")
+            self.statusBar().showMessage("Paused")
     
     def stop_playback(self):
         """Arrête la lecture"""
@@ -381,19 +357,21 @@ class NeptuneMainWindow(QMainWindow):
             pass
         
         self.is_playing = False
-        self.play_btn.setText("Lecture")
+        self.play_btn.setText("▶")
         self.play_btn.setEnabled(False)
         self.stop_btn.setEnabled(False)
         self.video_label.setText(
-            "Aucune vidéo chargée\\n\\nSélectionnez une vidéo pour commencer"
+            "MONITORING STOPPED"
         )
-        self.statusBar().showMessage("Arrêté")
+        self.statusBar().showMessage("Stopped")
     
     def update_frame(self, frame):
         """Met à jour l'affichage de la frame vidéo"""
         try:
             h, w, c = frame.shape
             qimg = QImage(frame.data, w, h, 3*w, QImage.Format.Format_RGB888).rgbSwapped()
+
+            # Scale respecting aspect ratio within the label
             pix = QPixmap.fromImage(qimg).scaled(
                 self.video_label.size(), 
                 Qt.AspectRatioMode.KeepAspectRatio, 
@@ -406,32 +384,20 @@ class NeptuneMainWindow(QMainWindow):
     def update_stats(self, stats):
         """Met à jour les statistiques affichées"""
         try:
-            self.stats_labels['active'].setText(f"{stats['active']}")
-            self.stats_labels['underwater'].setText(f"{stats['underwater']}")
-            self.stats_labels['danger'].setText(f"{stats['danger']}")
+            self.lbl_active.setText(f"{stats['active']}")
+            self.lbl_underwater.setText(f"{stats['underwater']}")
+            self.lbl_danger.setText(f"{stats['danger']}")
             
-            # Affichage du score max avec l'ID de la personne
             max_score = stats['max_score']
-            max_score_id = stats.get('max_score_id')
-            if max_score_id is not None and max_score > 0:
-                self.stats_labels['max_score'].setText(f"{max_score:.2f} (ID:{max_score_id})")
-            else:
-                self.stats_labels['max_score'].setText(f"{max_score:.2f}")
+            self.lbl_max_score.setText(f"{max_score:.1f}")
             
-            # Couleur spéciale pour les dangers
-            danger_style = ("color:#ff4444; font-weight:bold;" 
-                          if stats['danger'] > 0 
-                          else "color:#ffffff; font-weight:bold;")
-            self.stats_labels['danger'].setStyleSheet(danger_style)
-            
-            # Couleur spéciale pour le score max élevé
+            # Dynamic styling for high risk
             if max_score >= 50:
-                max_score_style = "color:#ff4444; font-weight:bold;"
+                 self.lbl_max_score.setStyleSheet("color: #FF3B30; font-weight: bold;") # Danger
             elif max_score >= 30:
-                max_score_style = "color:#ffaa00; font-weight:bold;"
+                 self.lbl_max_score.setStyleSheet("color: #FF9500; font-weight: bold;") # Warning
             else:
-                max_score_style = "color:#ffffff; font-weight:bold;"
-            self.stats_labels['max_score'].setStyleSheet(max_score_style)
+                 self.lbl_max_score.setStyleSheet("color: #00D4FF; font-weight: bold;") # Normal
             
         except Exception as e:
             print(f"[UI] update_stats KO: {e}")
@@ -440,49 +406,43 @@ class NeptuneMainWindow(QMainWindow):
         """Gère l'affichage d'une nouvelle alerte"""
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.alerts_text.append(f"[{timestamp}] {message}")
-        self.statusBar().showMessage(f"ALERTE: {message}")
+
+        # Auto-scroll
+        sb = self.alerts_text.verticalScrollBar()
+        sb.setValue(sb.maximum())
+
+        self.statusBar().showMessage(f"ALERT: {message}")
     
     def test_voice_alert(self):
         """Teste l'alerte vocale"""
         speak_alert("test")
-        self.handle_alert("Test d'alerte vocale déclenché")
+        self.handle_alert("Voice alert system test")
     
     def toggle_water_detection(self, checked):
         """Bascule l'affichage de la détection d'eau"""
         self.video_processor.show_water_detection = checked
-        text = "Masquer Détection Eau" if checked else "Afficher Détection Eau"
-        self.btn_toggle_water.setText(text)
-        print(f"[UI] Eau: {'ON' if checked else 'OFF'}")
+        self.btn_toggle_water.setChecked(checked)
+        print(f"[UI] Water Overlay: {'ON' if checked else 'OFF'}")
     
     def recalculate_water_zone(self):
-        """Recalcule la zone d'eau de manière thread-safe"""
-        print("[UI] Recalcul zone d'eau…")
-        
-        # Désactiver le bouton pendant l'opération
-        self.btn_recalc_water.setEnabled(False)
-        self.btn_recalc_water.setText("Recalcul en cours...")
-        
-        # Forcer le traitement des événements UI
+        """Recalcule la zone d'eau"""
+        print("[UI] Recalculating water zone...")
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        self.statusBar().showMessage("Recalculating water zone...")
         QApplication.processEvents()
         
         try:
             if self.video_processor.recalculate_water_detection():
-                self.btn_toggle_water.setChecked(True)
                 self.toggle_water_detection(True)
-                self.statusBar().showMessage("Zone d'eau recalculée !", 3000)
-                self.handle_alert("Zone d'eau recalculée")
+                self.statusBar().showMessage("Water zone updated successfully", 3000)
+                self.handle_alert("Water zone updated")
             else:
-                self.statusBar().showMessage("Échec recalcul zone d'eau", 3000)
-                self.handle_alert("Échec recalcul zone d'eau")
-        
+                self.statusBar().showMessage("Failed to update water zone", 3000)
         except Exception as e:
-            print(f"[UI] Erreur recalcul: {e}")
-            self.statusBar().showMessage(f"Erreur: {e}", 3000)
-        
+            print(f"[UI] Error: {e}")
+            self.statusBar().showMessage(f"Error: {e}", 3000)
         finally:
-            # Réactiver le bouton
-            self.btn_recalc_water.setEnabled(True)
-            self.btn_recalc_water.setText("Recalculer Zone d'Eau")
+             QApplication.restoreOverrideCursor()
     
     def update_confidence(self, value):
         """Met à jour le seuil de confiance"""
@@ -491,32 +451,32 @@ class NeptuneMainWindow(QMainWindow):
     def update_danger_threshold(self, value):
         """Met à jour le seuil de danger"""
         self.video_processor.danger_threshold = float(value)
+
+    def update_skip_frames(self, value):
+        """Updates the skip frames setting"""
+        self.video_processor.skip_frames = value
     
     # === Gestion des événements ===
     
     def keyPressEvent(self, event):
         """Gère les raccourcis clavier"""
         if event.key() == Qt.Key.Key_W:
-            self.btn_toggle_water.toggle()
-            self.toggle_water_detection(self.btn_toggle_water.isChecked())
+            self.btn_toggle_water.click()
         elif event.key() == Qt.Key.Key_T:
             self.test_voice_alert()
         elif event.key() == Qt.Key.Key_R:
             self.recalculate_water_zone()
+        elif event.key() == Qt.Key.Key_Space:
+            if self.play_btn.isEnabled():
+                self.play_btn.click()
         else:
             super().keyPressEvent(event)
     
     def closeEvent(self, event):
         """Gère la fermeture de l'application de manière sécurisée"""
-        print("[UI] Fermeture de l'application...")
-        
         try:
             if self.video_processor.isRunning():
-                print("[UI] Arrêt du processeur vidéo...")
                 self.video_processor.stop()
-                print("[UI] Processeur vidéo arrêté")
         except Exception as e:
-            print(f"[UI] Erreur lors de l'arrêt: {e}")
-        
-        print("[UI] Fermeture terminée")
+            print(f"[UI] Shutdown error: {e}")
         event.accept()

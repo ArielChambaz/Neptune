@@ -1,28 +1,171 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Neptune Video Processor
-- Thread de traitement vidéo principal
+Neptune Video Processor (Client WebSocket)
+- Connects to the API via WebSocket to process video frames.
+- Sends frames to the server and receives detection results.
 """
 
 import cv2
 import time
 import numpy as np
 import threading
-from PyQt6.QtCore import QThread, pyqtSignal
+import json
+import base64
+import asyncio
+import queue
+from PyQt6.QtCore import QThread, pyqtSignal, QObject
+import websockets
 
-from config_pyqt6 import DETECTION, ALERTS
-from core.constants import MAP_W_PX, MAP_H_PX
-from core.tracker import UnderwaterPersonTracker
-from detection.models import ModelManager
-from detection.water import WaterDetector
-from utils.alerts import AlertPopup
-from utils.danger import calculate_distance_from_shore
+from config_pyqt6 import API, DETECTION, ALERTS
 from utils.audio import speak_alert
+from utils.alerts import AlertPopup
+
+# --- Helper functions (adapted from streamlit_app.py) ---
+def encode_frame_jpeg(frame, quality=75):
+    """Encode frame as JPEG and return base64 string"""
+    encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
+    _, buffer = cv2.imencode('.jpg', frame, encode_param)
+    return base64.b64encode(buffer).decode('utf-8')
+
+def get_color_by_dangerosity(score: int) -> tuple:
+    """Calculate BGR color based on dangerosity score (0-100)"""
+    if score <= 20:
+        r = int(144 * (score / 20.0))
+        g = int(100 + 138 * (score / 20.0))
+        b = r
+        return (b, g, r)
+
+    if score <= 40:
+        ratio = (score - 20) / 20.0
+        return (int(144 * (1 - ratio)), int(238 + 17 * ratio), int(144 + 111 * ratio))
+
+    if score <= 60:
+        ratio = (score - 40) / 20.0
+        return (0, int(255 - 90 * ratio), 255)
+
+    if score <= 80:
+        ratio = (score - 60) / 20.0
+        return (0, int(165 * (1 - ratio)), 255)
+
+    ratio = (score - 80) / 20.0
+    return (0, 0, int(255 - 116 * ratio))
+
+# --- Async Worker for WebSocket ---
+class WebSocketWorker:
+    def __init__(self, ws_url, session_id, conf_threshold, underwater_threshold, danger_threshold, jpeg_quality, fps_target):
+        self.ws_url = ws_url
+        self.session_id = session_id
+        self.conf_threshold = conf_threshold
+        self.underwater_threshold = underwater_threshold
+        self.danger_threshold = danger_threshold
+        self.jpeg_quality = jpeg_quality
+        self.fps_target = fps_target
+
+        self.running = False
+        self.websocket = None
+        self.loop = None
+        self.send_queue = asyncio.Queue(maxsize=5)
+        self.result_queue = queue.Queue() # Thread-safe queue for results to be consumed by VideoProcessor
+
+    async def connect(self):
+        """Connect to WebSocket and initialize session"""
+        try:
+            self.websocket = await websockets.connect(self.ws_url)
+
+            # Send initialization message
+            init_msg = {
+                'type': 'init',
+                'session_id': self.session_id,
+                'conf_threshold': self.conf_threshold,
+                'underwater_threshold': self.underwater_threshold,
+                'danger_threshold': self.danger_threshold,
+                'jpeg_quality': self.jpeg_quality,
+                'fps_target': self.fps_target
+            }
+            await self.websocket.send(json.dumps(init_msg))
+
+            # Wait for init success
+            response = await self.websocket.recv()
+            result = json.loads(response)
+
+            if result.get('type') == 'init_success':
+                return True
+            return False
+        except Exception as e:
+            print(f"[WebSocket] Connection error: {e}")
+            return False
+
+    async def _send_loop(self):
+        while self.running:
+            try:
+                frame_data = await self.send_queue.get()
+                await self.websocket.send(json.dumps(frame_data))
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                print(f"[WebSocket] Send error: {e}")
+
+    async def _recv_loop(self):
+        while self.running:
+            try:
+                response = await self.websocket.recv()
+                result = json.loads(response)
+                self.result_queue.put(result)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                print(f"[WebSocket] Receive error: {e}")
+                break
+
+    async def run(self):
+        self.running = True
+        if not await self.connect():
+             print("[WebSocket] Failed to connect")
+             self.running = False
+             return
+
+        send_task = asyncio.create_task(self._send_loop())
+        recv_task = asyncio.create_task(self._recv_loop())
+
+        try:
+            await asyncio.gather(send_task, recv_task)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if self.websocket:
+                await self.websocket.close()
+
+    def add_frame(self, frame_data):
+        try:
+            self.loop.call_soon_threadsafe(self.send_queue.put_nowait, frame_data)
+        except asyncio.QueueFull:
+            pass # Skip frame if queue is full
+        except Exception as e:
+            print(f"[WebSocket] Add frame error: {e}")
+
+    def update_config(self, conf_threshold=None, danger_threshold=None):
+        """Send configuration update to server"""
+        if not self.websocket or not self.running:
+            return
+
+        update_msg = {
+            'type': 'update_config',
+            'session_id': self.session_id,
+        }
+        if conf_threshold is not None:
+            update_msg['conf_threshold'] = conf_threshold
+        if danger_threshold is not None:
+            update_msg['danger_threshold'] = danger_threshold
+
+        try:
+            self.loop.call_soon_threadsafe(self.send_queue.put_nowait, update_msg)
+        except Exception as e:
+            print(f"[WebSocket] Update config error: {e}")
 
 
 class VideoProcessor(QThread):
-    """Thread principal de traitement vidéo"""
+    """Thread principal de traitement vidéo (Client WebSocket)"""
     
     frameReady = pyqtSignal(np.ndarray)
     statsReady = pyqtSignal(dict)
@@ -43,30 +186,73 @@ class VideoProcessor(QThread):
         self._lock = threading.Lock()
         
         # Configuration
-        self.conf_threshold = DETECTION['conf_threshold']
-        self.underwater_threshold = DETECTION['underwater_threshold']
-        self.danger_threshold = ALERTS['danger_threshold']
+        self._conf_threshold = DETECTION['conf_threshold']
+        self._underwater_threshold = DETECTION['underwater_threshold']
+        self._danger_threshold = ALERTS['danger_threshold']
         
-        # Composants principaux
-        self.model_manager = ModelManager()
-        self.water_detector = WaterDetector()
-        self.tracker = None
-        self.alert_popup = AlertPopup(duration=7.0)
-        
+        # WebSocket / API settings
+        self.api_url = API['base_url']
+        self.ws_url = f"{API['ws_url']}/stream/realtime"
+        self.jpeg_quality = API['jpeg_quality']
+        self.fps_target = API['fps_target']
+        self._skip_frames = API['skip_frames']
+
         # Interface
         self.show_water_detection = False
+        self.alert_popup = AlertPopup(duration=ALERTS['popup_duration'])
+
+        # Tracking spoken alerts
+        self.spoken_alerts = set()
+        self.last_alert_time = 0
+        self.alert_cooldown = 10.0 # seconds
         
-        # Temps
-        self.frame_timestamp = None
-        
+        self.ws_worker = None
+        self.ws_thread = None
+        self.session_id = None
+        self.loop = None
+
+        # Latest state for display (decoupled from inference loop)
+        self.latest_result = {
+            'detections': [],
+            'water_zone': None,
+            'stats': {},
+            'alerts': []
+        }
+
+    @property
+    def skip_frames(self):
+        return self._skip_frames
+
+    @skip_frames.setter
+    def skip_frames(self, value):
+        self._skip_frames = int(value)
+
+    @property
+    def conf_threshold(self):
+        return self._conf_threshold
+
+    @conf_threshold.setter
+    def conf_threshold(self, value):
+        self._conf_threshold = float(value)
+        if self.ws_worker and self.ws_worker.running:
+            self.ws_worker.update_config(conf_threshold=self._conf_threshold)
+
+    @property
+    def danger_threshold(self):
+        return self._danger_threshold
+
+    @danger_threshold.setter
+    def danger_threshold(self, value):
+        self._danger_threshold = float(value)
+        if self.ws_worker and self.ws_worker.running:
+            self.ws_worker.update_config(danger_threshold=self._danger_threshold)
+
     def load_models(self):
         """
-        Charge les modèles IA
-        
-        Returns:
-            bool: True si le chargement réussit
+        Mock for compatibility with UI.
+        The actual models are on the server.
         """
-        return self.model_manager.load_models()
+        return True
     
     def load_video(self, path):
         """
@@ -87,72 +273,25 @@ class VideoProcessor(QThread):
         self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
         self.fps = self.cap.get(cv2.CAP_PROP_FPS) or 30
         
-        # Initialisation du tracker
-        self.tracker = UnderwaterPersonTracker(
-            max_distance=DETECTION['max_distance'],
-            max_disappeared=DETECTION['max_disappeared']
-        )
-        
-        # Analyse de la première frame pour l'eau
-        self._analyze_water_first_frame()
-        
         return True
-    
-    def _analyze_water_first_frame(self):
-        """Analyse la première frame pour détecter l'eau"""
-        if not self.model_manager.has_water_model():
-            return
-        
-        self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-        ok, frame = self.cap.read()
-        if not ok:
-            return
-        
-        self.water_detector.compute_water_and_homography(frame, self.model_manager.nwsd)
-        self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
     
     def recalculate_water_detection(self) -> bool:
         """
-        Recalcule la détection d'eau sur la frame actuelle
-        Sans interrompre la lecture vidéo
-        
-        Returns:
-            bool: True si le recalcul réussit
+        Sends a request to the server to recalculate the water zone.
         """
-        if not hasattr(self, 'cap') or self.cap is None:
-            print("Aucune vidéo chargée")
-            return False
-        
-        # On utilise une nouvelle capture temporaire pour éviter les conflits
-        try:
-            temp_cap = cv2.VideoCapture(self.video_path)
-            if not temp_cap.isOpened():
-                print("[Water] Impossible d'ouvrir la vidéo temporaire")
+        if self.ws_worker and self.ws_worker.running:
+            recalc_msg = {
+                'type': 'recalculate_water',
+                'session_id': self.session_id
+            }
+            try:
+                self.ws_worker.loop.call_soon_threadsafe(self.ws_worker.send_queue.put_nowait, recalc_msg)
+                print("[VideoProcessor] Recalculate water detection requested")
+                return True
+            except Exception as e:
+                print(f"[VideoProcessor] Failed to request water recalc: {e}")
                 return False
-            
-            # Se positionner à la frame actuelle (ou proche)
-            current_frame = getattr(self, 'current_frame', 0)
-            temp_cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, current_frame - 1))
-            
-            ok, frame = temp_cap.read()
-            temp_cap.release()  # Libérer immédiatement
-            
-            if not ok:
-                print("[Water] Impossible de lire la frame pour recalcul")
-                return False
-            
-            # Recalculer l'homographie avec la frame obtenue
-            ok2 = self.water_detector.compute_water_and_homography(frame, self.model_manager.nwsd)
-            
-            if ok2:
-                self.show_water_detection = True
-                print("[Water] Zone d'eau recalculée avec succès (sans interruption)")
-            
-            return ok2
-            
-        except Exception as e:
-            print(f"[Water] Erreur lors du recalcul: {e}")
-            return False
+        return False
     
     def run(self):
         """Boucle principale de traitement vidéo"""
@@ -160,270 +299,248 @@ class VideoProcessor(QThread):
             return
         
         self.is_running = True
-        start_time = time.time()
+        self.session_id = f"stream_{int(time.time() * 1000)}"
+        self.spoken_alerts.clear()
+
+        # Reset state
+        self.latest_result = {
+            'detections': [],
+            'water_zone': None,
+            'stats': {},
+            'alerts': []
+        }
+
+        # Start WebSocket Worker in a separate thread with its own event loop
+        self.loop = asyncio.new_event_loop()
+        self.ws_worker = WebSocketWorker(
+            self.ws_url,
+            self.session_id,
+            self._conf_threshold,
+            self._underwater_threshold,
+            self._danger_threshold,
+            self.jpeg_quality,
+            self.fps_target
+        )
+        self.ws_worker.loop = self.loop
+
+        def run_ws():
+            asyncio.set_event_loop(self.loop)
+            self.loop.run_until_complete(self.ws_worker.run())
+
+        self.ws_thread = threading.Thread(target=run_ws, daemon=True)
+        self.ws_thread.start()
+
+        # Give some time for connection
+        time.sleep(1)
+
         frame_idx = 0
-        frame_time = 1.0 / max(self.fps, 1e-6)
+        frame_counter = 0
+
+        # Target frame interval for 15 FPS
+        target_interval = 1.0 / 15.0
         
         while self.is_running:
+            loop_start = time.time()
+
             if self.is_paused:
                 time.sleep(0.1)
                 continue
             
+            # Read frame
             ok, frame = self.cap.read()
             if not ok:
-                # Retour au début de la vidéo
+                # Retour au début de la vidéo (boucle infinie pour simuler caméra)
                 self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                 continue
             
+            frame_counter += 1
             frame_idx += 1
             self.current_frame = frame_idx
-            self.frame_timestamp = start_time + (frame_idx / self.fps)
             
-            # Si pas d'homographie, affichage basique
-            if not self.water_detector.has_homography():
-                self.frameReady.emit(frame)
-                time.sleep(frame_time)
-                continue
+            # Decoupled Inference: Send if needed, don't wait
+            should_infer = (frame_counter % self.skip_frames == 0)
+
+            if should_infer and self.ws_worker.running:
+                timestamp = time.time()
+                frame_b64 = encode_frame_jpeg(frame, self.jpeg_quality)
+
+                message = {
+                    'type': 'frame',
+                    'session_id': self.session_id,
+                    'frame_id': frame_idx,
+                    'data': frame_b64,
+                    'timestamp': timestamp
+                }
+
+                # Fire and forget (queue handles backpressure by dropping if full)
+                self.ws_worker.add_frame(message)
+
+            # Check for results (updates self.latest_result)
+            self._check_and_update_state()
+
+            # Immediate Display: Draw whatever latest result we have on the CURRENT frame
+            # This causes the "bbox lag" effect requested by user, but keeps 15 FPS fluid.
             
-            # Détection et tracking
-            persons = self.model_manager.detect_persons(frame, self.conf_threshold)
-            assignments = self.tracker.update(persons, self.frame_timestamp)
+            # Retrieve cached data
+            res = self.latest_result
+            detections = res.get('detections', [])
+            water_zone = res.get('water_zone')
             
-            # Récupération des tracks
-            active_tracks = self.tracker.get_active_tracks()
-            underwater_tracks = self.tracker.get_underwater_tracks()
-            danger_tracks = self.tracker.get_danger_tracks(now=self.frame_timestamp)
-            
-            # Gestion des alertes
-            self._handle_danger_alerts(danger_tracks)
-            
-            # Création de la minimap
-            map_canvas = self._create_minimap(active_tracks, danger_tracks, frame_idx)
-            
-            # Mise à jour des distances et scores
-            self._update_tracks_positions(active_tracks)
-            self._update_inactive_tracks_positions()
-            
-            # Force une mise à jour des scores avant calcul des stats
-            self.tracker._update_dangerosity_scores(self.frame_timestamp)
-            
-            # Création de la frame finale
-            vis = self._draw_overlays(frame, persons, assignments, active_tracks, 
-                                    underwater_tracks, danger_tracks, map_canvas)
-            
-            # Statistiques
-            all_tracks = self.tracker.get_all_tracks()
-            max_score = 0
-            max_score_id = None
-            
-            for tid, track in all_tracks.items():
-                score = track.get('dangerosity_score', 0)
-                if score > max_score:
-                    max_score = score
-                    max_score_id = tid
-            
-            stats = {
-                'active': len(active_tracks),
-                'underwater': len(underwater_tracks),
-                'danger': len(danger_tracks),
-                'max_score': max_score,
-                'max_score_id': max_score_id,
-            }
-            
-            # Émission des signaux
+            # Draw
+            vis = self._draw_detections(frame, detections, water_zone)
             self.frameReady.emit(vis)
-            self.statsReady.emit(stats)
-            
-            # Contrôle du timing
-            elapsed = time.time() - start_time - (frame_idx / self.fps)
-            if elapsed < frame_time:
-                time.sleep(frame_time - elapsed)
-    
-    def _handle_danger_alerts(self, danger_tracks):
-        """Gère les alertes de danger"""
-        for tid, t in danger_tracks.items():
-            if not t['voice_alert_sent']:
-                msg = f"DANGER: Baigneur {tid} en danger!"
-                speak_alert("danger")
-                self.alert_popup.add_alert(msg, duration=8.0)
-                t['voice_alert_sent'] = True
-                self.alertTriggered.emit(msg)
-    
-    def _create_minimap(self, active_tracks, danger_tracks, frame_idx):
-        """Crée la minimap avec les positions des baigneurs"""
-        map_canvas = np.full((MAP_H_PX, MAP_W_PX, 3), 50, np.uint8)
+
+            # Maintain 15 FPS
+            elapsed = time.time() - loop_start
+            wait_time = max(0, target_interval - elapsed)
+            time.sleep(wait_time)
+
+    def _check_and_update_state(self):
+        """Helper to check result queue and update latest state"""
+        try:
+            # Drain queue to get the absolute latest result if multiple arrived
+            latest = None
+            while not self.ws_worker.result_queue.empty():
+                result = self.ws_worker.result_queue.get_nowait()
+                if result.get('type') == 'result':
+                    latest = result
+
+            if latest:
+                self._update_state_from_result(latest)
+
+        except queue.Empty:
+            pass
+
+    def _update_state_from_result(self, result):
+        """Update the internal state with new API results"""
+
+        # Update latest result cache
+        self.latest_result['detections'] = result.get('detections', [])
+
+        wz = result.get('water_zone')
+        if wz is not None:
+             self.latest_result['water_zone'] = wz
+
+        stats_api = result.get('stats', {})
+        self.latest_result['stats'] = stats_api
+
+        alerts = result.get('alerts', [])
         
-        # Import nécessaire pour les couleurs
-        from core.constants import DANGER_COLOR
-        from utils.danger import get_color_by_dangerosity
-        import math
-        
-        # Croix de plongée pour tous les tracks
-        for tid, t in self.tracker.get_all_tracks().items():
-            if t.get('dive_point') is None:
-                continue
-            
-            dive_pos = self.water_detector.transform_point_to_minimap(t['dive_point'])
-            if dive_pos is None:
-                continue
-            
-            x, y = int(dive_pos[0]), int(dive_pos[1])
-            if 0 <= x < MAP_W_PX and 0 <= y < MAP_H_PX:
-                col = DANGER_COLOR if tid in danger_tracks else get_color_by_dangerosity(t.get('dangerosity_score', 0))
-                cv2.drawMarker(map_canvas, (x, y), col, cv2.MARKER_CROSS, 10, 2)
-        
-        # Points actifs et traces
-        for tid, t in active_tracks.items():
-            if not t.get('history'):
-                continue
-            
-            # Position actuelle
-            current_pos = self.water_detector.transform_point_to_minimap(t['history'][-1])
-            if current_pos is None:
-                continue
-            
-            x, y = int(current_pos[0]), int(current_pos[1])
-            if 0 <= x < MAP_W_PX and 0 <= y < MAP_H_PX:
-                color = get_color_by_dangerosity(t['dangerosity_score'])
-                
-                if tid in danger_tracks and t['status'] == 'underwater':
-                    cv2.circle(map_canvas, (x, y), 6, color, -1)
-                    pulse = 8 + int(2 * math.sin(frame_idx * 0.3))
-                    cv2.circle(map_canvas, (x, y), pulse, DANGER_COLOR, 2)
-                else:
-                    cv2.circle(map_canvas, (x, y), 4, color, -1)
-                
-                cv2.putText(map_canvas, f"{tid}({t['dangerosity_score']})",
-                          (x + 8, y - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.3, color, 1)
-            
-            # Traces de mouvement
-            if len(t['history']) > 1:
-                color = get_color_by_dangerosity(t.get('dangerosity_score', 0))
-                pts = []
-                
-                for hist_pos in t['history'][-15:]:
-                    map_pos = self.water_detector.transform_point_to_minimap(hist_pos)
-                    if map_pos is None:
-                        continue
-                    
-                    x, y = int(map_pos[0]), int(map_pos[1])
-                    if 0 <= x < MAP_W_PX and 0 <= y < MAP_H_PX:
-                        pts.append((x, y))
-                
-                if len(pts) > 1:
-                    cv2.polylines(map_canvas, [np.array(pts, np.int32)], False, color, 1)
-        
-        return map_canvas
-    
-    def _update_tracks_positions(self, active_tracks):
-        """Met à jour les positions des tracks actifs dans la minimap"""
-        for tid, t in active_tracks.items():
-            if not t.get('history'):
-                continue
-            
-            current_pos = self.water_detector.transform_point_to_minimap(t['history'][-1])
-            if current_pos is None:
-                continue
-            
-            x, y = current_pos
-            if 0 <= x < MAP_W_PX and 0 <= y < MAP_H_PX:
-                d = calculate_distance_from_shore(x, y, MAP_W_PX, MAP_H_PX)
-                t['distance_from_shore'] = d
-    
-    def _update_inactive_tracks_positions(self):
-        """Met à jour les positions des tracks inactifs"""
-        active_tracks = self.tracker.get_active_tracks()
-        
-        for tid, t in self.tracker.get_all_tracks().items():
-            if tid in active_tracks or not t.get('center'):
-                continue
-            
-            pos = self.water_detector.transform_point_to_minimap(t['center'])
-            if pos is None:
-                continue
-            
-            x, y = pos
-            if 0 <= x < MAP_W_PX and 0 <= y < MAP_H_PX:
-                d = calculate_distance_from_shore(x, y, MAP_W_PX, MAP_H_PX)
-                t['distance_from_shore'] = d
-    
-    def _draw_overlays(self, frame, persons, assignments, active_tracks, 
-                      underwater_tracks, danger_tracks, map_canvas):
-        """Dessine tous les overlays sur la frame"""
-        # Import local pour éviter les dépendances circulaires
-        import cv2
-        import math
-        from core.constants import DANGER_COLOR
-        from utils.danger import get_color_by_dangerosity
-        
+        # Handle Alerts immediately
+        current_time = time.time()
+        for alert in alerts:
+            msg = alert['message']
+            self.alertTriggered.emit(msg)
+
+            # Check for danger alerts and speak if not already spoken recently
+            if "DANGER" in msg or "danger" in msg.lower():
+                track_id = alert.get('track_id')
+                alert_key = track_id if track_id is not None else msg
+
+                if alert_key not in self.spoken_alerts or (current_time - self.last_alert_time > self.alert_cooldown):
+                    speak_alert("danger")
+                    self.alert_popup.add_alert(msg, duration=8.0)
+                    self.spoken_alerts.add(alert_key)
+                    self.last_alert_time = current_time
+
+        # Prepare stats for UI
+        detections = self.latest_result['detections']
+        max_score = 0
+        max_score_id = None
+        underwater_count = 0
+        danger_count = 0
+        active_count = len(detections)
+
+        for det in detections:
+            score = det['dangerosity_score']
+            if score > max_score:
+                max_score = score
+                max_score_id = det['track_id']
+            if det['status'] == 'underwater':
+                underwater_count += 1
+            if det['status'] == 'danger':
+                danger_count += 1
+
+        stats = {
+            'active': active_count,
+            'underwater': underwater_count,
+            'danger': danger_count,
+            'max_score': max_score,
+            'max_score_id': max_score_id,
+            # Add API specific stats
+            'api_fps': stats_api.get('fps', 0),
+            'api_proc_time': stats_api.get('processing_time_ms', 0)
+        }
+        self.statsReady.emit(stats)
+
+    def _draw_detections(self, frame, detections, water_zone):
+        """Draw detections on frame (matching app renderer style)"""
         vis = frame.copy()
         
-        # Overlay de détection d'eau
-        if self.show_water_detection:
-            water_mask = self.water_detector.get_water_mask()
-            src_quad = self.water_detector.get_source_quad()
+        # Draw water zone
+        if self.show_water_detection and water_zone and water_zone.get('detected') and water_zone.get('polygon'):
+            pts = np.array(water_zone['polygon'], dtype=np.int32)
+            cv2.polylines(vis, [pts], True, (0, 255, 0), 3)
+            # Overlay
+            overlay = np.zeros_like(vis)
+            cv2.fillPoly(overlay, [pts], (255, 100, 0))
+            vis = cv2.addWeighted(vis, 1.0, overlay, 0.2, 0)
+
+        # Draw detections
+        for det in detections:
+            bbox = det['bbox']
+            cx = bbox['center_x']
+            cy = bbox['center_y']
+            w = bbox['width']
+            h = bbox['height']
             
-            if water_mask is not None:
-                overlay = np.zeros_like(vis)
-                overlay[water_mask > 0] = [255, 100, 0]
-                vis = cv2.addWeighted(vis, 0.8, overlay, 0.2, 0)
+            x0 = int(cx - w/2)
+            y0 = int(cy - h/2)
+            x1 = int(cx + w/2)
+            y1 = int(cy + h/2)
             
-            if src_quad is not None:
-                q = src_quad.astype(np.int32)
-                cv2.polylines(vis, [q], True, (0, 255, 0), 3)
-                for i, p in enumerate(q):
-                    cv2.circle(vis, tuple(p), 8, (0, 255, 0), -1)
-                    cv2.putText(vis, f"{i+1}", (p[0]+10, p[1]-10), 
-                              cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        
-        # Boîtes de détection des personnes
-        for idx, p in enumerate(persons):
-            cx, cy, w, h = p.xywh[0]
-            conf = float(p.conf[0].item())
-            x0, y0, x1, y1 = int(cx - w/2), int(cy - h/2), int(cx + w/2), int(cy + h/2)
+            score = det['dangerosity_score']
+            color = get_color_by_dangerosity(score)
+            status = det['status']
+            is_danger = (status == 'danger')
             
-            tid = assignments.get(idx, -1)
+            # BBox
+            thickness = 4 if is_danger else 2
+            cv2.rectangle(vis, (x0, y0), (x1, y1), color, thickness)
             
-            if tid != -1 and tid in active_tracks:
-                t = active_tracks[tid]
-                score = t.get('dangerosity_score', 0)
-                color = get_color_by_dangerosity(score)
-                is_danger = tid in danger_tracks
-                
-                cv2.rectangle(vis, (x0, y0), (x1, y1), color, 4 if is_danger else 2)
-                
-                if t['status'] == 'underwater':
-                    dur = self.frame_timestamp - (t.get('underwater_start_time') or self.frame_timestamp)
-                    label = f"ID:{tid} (UNDERWATER) - Score:{score} | {dur:.1f}s"
-                else:
-                    label = f"ID:{tid} - Score:{score}"
-                
-                sz = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
-                cv2.rectangle(vis, (x0, y0-35), (x0+sz[0]+10, y0-5), (0, 0, 0), -1)
-                cv2.putText(vis, label, (x0+5, y0-15), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-                cv2.putText(vis, f"Conf:{conf:.2f}", (x0, y1+20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+            # Draw Red Cross if Danger
+            if is_danger:
+                # Draw Red Cross (X) at center
+                cross_color = (0, 0, 255) # Red
+                cross_size = 20
+                cross_thickness = 3
+
+                center_x, center_y = int(cx), int(cy)
+
+                # Line 1: Top-Left to Bottom-Right
+                cv2.line(vis, (center_x - cross_size, center_y - cross_size),
+                         (center_x + cross_size, center_y + cross_size), cross_color, cross_thickness)
+
+                # Line 2: Top-Right to Bottom-Left
+                cv2.line(vis, (center_x + cross_size, center_y - cross_size),
+                         (center_x - cross_size, center_y + cross_size), cross_color, cross_thickness)
+
+            # Label
+            track_id = det['track_id']
+            if status == 'underwater':
+                label = f"ID:{track_id} (UNDERWATER) - Score:{score} | {det['underwater_duration']:.1f}s"
             else:
-                cv2.rectangle(vis, (x0, y0), (x1, y1), (0, 255, 0), 2)
-                cv2.putText(vis, f"New:{conf:.2f}", (x0, y0-10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        
-        # Croix de danger aux points de plongée
-        for tid in danger_tracks:
-            t = self.tracker.tracks[tid]
-            if t.get('dive_point') is None:
-                continue
-            dx, dy = map(int, t['dive_point'])
-            cv2.drawMarker(vis, (dx, dy), DANGER_COLOR, cv2.MARKER_CROSS, 20, 3)
-        
-        # Minimap incrustée
-        if map_canvas is not None:
-            mh, mw = map_canvas.shape[:2]
-            y0, x0 = 10, vis.shape[1] - mw - 10
-            cv2.rectangle(vis, (x0-5, y0-5), (x0+mw+5, y0+mh+5), (0, 0, 0), -1)
-            cv2.rectangle(vis, (x0-5, y0-5), (x0+mw+5, y0+mh+5), (255, 255, 255), 2)
-            vis[y0:y0+mh, x0:x0+mw] = map_canvas
-            cv2.putText(vis, "MINIMAP", (x0, y0-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        
-        # Alertes actives (HUD)
+                label = f"ID:{track_id} - Score:{score}"
+
+            sz = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
+            cv2.rectangle(vis, (x0, y0-35), (x0+sz[0]+10, y0-5), (0, 0, 0), -1)
+            cv2.putText(vis, label, (x0+5, y0-15), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+            # Confidence
+            conf = det['confidence']
+            cv2.putText(vis, f"Conf:{conf:.2f}", (x0, y1+20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+
+        # Alert Popup HUD
         self.alert_popup.update()
         alerts = self.alert_popup.get_active_alerts()
         if alerts:
@@ -435,9 +552,9 @@ class VideoProcessor(QThread):
             for i, a in enumerate(alerts[-3:]):
                 col = (0, 0, 255) if "DANGER" in a else (255, 165, 0)
                 cv2.putText(vis, f"• {a}", (40, base_y+45 + i*30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, col, 2)
-        
+
         return vis
-    
+
     # Contrôles du thread
     def set_video_path(self, path):
         """Définit le chemin de la vidéo"""
@@ -452,9 +569,17 @@ class VideoProcessor(QThread):
         print("[VideoProcessor] Arrêt demandé...")
         self.is_running = False
         
+        # Stop WS worker
+        if self.ws_worker:
+            self.ws_worker.running = False
+            # Cancel all tasks in the loop
+            if self.loop and self.loop.is_running():
+                for task in asyncio.all_tasks(self.loop):
+                    task.cancel()
+
         # Attendre que le thread se termine proprement
         if self.isRunning():
-            self.wait(2000)  # Attendre max 2 secondes
+            self.wait(2000)
             
         # Libérer les ressources vidéo
         if hasattr(self, 'cap') and self.cap is not None:
