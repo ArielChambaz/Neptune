@@ -17,8 +17,13 @@ import os
 import sys
 from PyQt6.QtWidgets import QApplication
 
-# Configuration de l'environnement Qt avant import
-from core.constants import QT_ENV_CONFIG
+# Configuration de l'environnement Qt
+# Use settings directly here or move to config_pyqt6.py
+QT_ENV_CONFIG = {
+    "QT_NO_XDG_DESKTOP_PORTAL": "1",
+    "QT_STYLE_OVERRIDE": "Fusion",
+    "QT_ICON_THEME": "hicolor"
+}
 for key, value in QT_ENV_CONFIG.items():
     os.environ.setdefault(key, value)
 
@@ -40,7 +45,7 @@ def main():
     app.setOrganizationName("Neptune Team")
     
     # Messages informatifs
-    print("Neptune (factorisé) – Raccourcis: W eau / T test audio / R recalcul eau")
+    print("Neptune (Client API) – Raccourcis: W eau / T test audio / R recalcul eau")
     print(f"Conf: conf={DETECTION['conf_threshold']}, "
           f"underwater={DETECTION['underwater_threshold']} frames, "
           f"danger={ALERTS['danger_threshold']} s")
