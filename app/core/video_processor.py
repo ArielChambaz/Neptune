@@ -144,6 +144,29 @@ class WebSocketWorker:
         except Exception as e:
             print(f"[WebSocket] Add frame error: {e}")
 
+    def update_config(self, conf_threshold=None, danger_threshold=None):
+        """Send configuration update to server"""
+        if not self.websocket or not self.running:
+            return
+
+        update_msg = {
+            'type': 'update_config',
+            'session_id': self.session_id,
+        }
+        if conf_threshold is not None:
+            update_msg['conf_threshold'] = conf_threshold
+        if danger_threshold is not None:
+            update_msg['danger_threshold'] = danger_threshold
+
+        # We need to queue this message, similar to frames
+        # But frames use a blocking queue. Let's add it there or handle directly?
+        # Direct send might not work if event loop is busy.
+        # Queueing is safer.
+        try:
+            self.loop.call_soon_threadsafe(self.send_queue.put_nowait, update_msg)
+        except Exception as e:
+            print(f"[WebSocket] Update config error: {e}")
+
 
 class VideoProcessor(QThread):
     """Thread principal de traitement vidéo (Client WebSocket)"""
@@ -167,9 +190,9 @@ class VideoProcessor(QThread):
         self._lock = threading.Lock()
         
         # Configuration
-        self.conf_threshold = DETECTION['conf_threshold']
-        self.underwater_threshold = DETECTION['underwater_threshold']
-        self.danger_threshold = ALERTS['danger_threshold']
+        self._conf_threshold = DETECTION['conf_threshold']
+        self._underwater_threshold = DETECTION['underwater_threshold']
+        self._danger_threshold = ALERTS['danger_threshold']
         
         # WebSocket / API settings
         self.api_url = API['base_url']
@@ -203,6 +226,28 @@ class VideoProcessor(QThread):
     @skip_frames.setter
     def skip_frames(self, value):
         self._skip_frames = int(value)
+
+    @property
+    def conf_threshold(self):
+        return self._conf_threshold
+
+    @conf_threshold.setter
+    def conf_threshold(self, value):
+        self._conf_threshold = float(value)
+        if self.ws_worker and self.ws_worker.running:
+            self.ws_worker.update_config(conf_threshold=self._conf_threshold)
+
+    @property
+    def danger_threshold(self):
+        return self._danger_threshold
+
+    @danger_threshold.setter
+    def danger_threshold(self, value):
+        self._danger_threshold = float(value)
+        if self.ws_worker and self.ws_worker.running:
+            self.ws_worker.update_config(danger_threshold=self._danger_threshold)
+
+    # underwater_threshold setter could be added similarly if needed
 
     def load_models(self):
         """
@@ -258,9 +303,9 @@ class VideoProcessor(QThread):
         self.ws_worker = WebSocketWorker(
             self.ws_url,
             self.session_id,
-            self.conf_threshold,
-            self.underwater_threshold,
-            self.danger_threshold,
+            self._conf_threshold,
+            self._underwater_threshold,
+            self._danger_threshold,
             self.jpeg_quality,
             self.fps_target
         )

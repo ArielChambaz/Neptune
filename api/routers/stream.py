@@ -27,44 +27,6 @@ active_sessions: Dict[str, Dict[str, Any]] = {}
 async def websocket_realtime_stream(websocket: WebSocket):
     """
     Enhanced WebSocket endpoint for real-time frame-by-frame video streaming
-    
-    Features:
-    - JPEG compression for reduced bandwidth
-    - Frame tracking with session state
-    - Underwater person tracking across frames
-    - Adaptive quality based on processing time
-    - Binary message support for efficiency
-    
-    Protocol:
-    Client -> Server:
-    {
-        "type": "init",
-        "session_id": "unique_id",
-        "conf_threshold": 0.7,
-        "underwater_threshold": 5,
-        "danger_threshold": 5.0,
-        "jpeg_quality": 75,
-        "fps_target": 15
-    }
-    
-    {
-        "type": "frame",
-        "session_id": "unique_id",
-        "frame_id": 123,
-        "data": "base64_jpeg_data",
-        "timestamp": 1234567890.123
-    }
-    
-    Server -> Client:
-    {
-        "type": "result",
-        "frame_id": 123,
-        "detections": [...],
-        "water_zone": {...},
-        "alerts": [...],
-        "stats": {...},
-        "processing_time_ms": 45.2
-    }
     """
     await websocket.accept()
     session_id = None
@@ -106,6 +68,28 @@ async def websocket_realtime_stream(websocket: WebSocket):
                     'message': 'Streaming session initialized'
                 })
             
+            elif msg_type == 'update_config':
+                # Update session configuration
+                session_id = message.get('session_id')
+                if session_id and session_id in active_sessions:
+                    session = active_sessions[session_id]
+
+                    # Update confidence threshold
+                    if 'conf_threshold' in message:
+                        session['conf_threshold'] = float(message['conf_threshold'])
+                        logger.info(f"Session {session_id}: Updated conf_threshold to {session['conf_threshold']}")
+
+                    # Update danger threshold (needs to update tracker)
+                    if 'danger_threshold' in message:
+                        new_danger = float(message['danger_threshold'])
+                        session['tracker'].danger_threshold = new_danger
+                        logger.info(f"Session {session_id}: Updated danger_threshold to {new_danger}")
+
+                    await websocket.send_json({
+                        'type': 'config_updated',
+                        'message': 'Configuration updated successfully'
+                    })
+
             elif msg_type == 'frame':
                 # Process incoming frame
                 frame_start = time.time()
@@ -143,6 +127,7 @@ async def websocket_realtime_stream(websocket: WebSocket):
                     continue
                 
                 # Detect persons
+                # Use session-specific confidence threshold
                 raw_detections = detection_service.model_manager.detect_persons(
                     frame,
                     conf_threshold=session['conf_threshold']
