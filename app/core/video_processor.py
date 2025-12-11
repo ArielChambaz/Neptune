@@ -181,7 +181,7 @@ class VideoProcessor(QThread):
         # Interface
         self.show_water_detection = False
         self.alert_popup = AlertPopup(duration=ALERTS['popup_duration'])
-        
+
         # Tracking spoken alerts
         self.spoken_alerts = set()
         self.last_alert_time = 0
@@ -191,6 +191,10 @@ class VideoProcessor(QThread):
         self.ws_thread = None
         self.session_id = None
         self.loop = None
+
+        # Frame buffer for synchronization
+        self.pending_frames = {}
+        self.max_pending_frames = 10
 
     def load_models(self):
         """
@@ -239,6 +243,7 @@ class VideoProcessor(QThread):
         self.is_running = True
         self.session_id = f"stream_{int(time.time() * 1000)}"
         self.spoken_alerts.clear()
+        self.pending_frames.clear()
 
         # Start WebSocket Worker in a separate thread with its own event loop
         self.loop = asyncio.new_event_loop()
@@ -272,6 +277,13 @@ class VideoProcessor(QThread):
                 time.sleep(0.1)
                 continue
             
+            # Backpressure: if pending frames buffer is full, wait
+            if len(self.pending_frames) >= self.max_pending_frames:
+                # Check for results to clear buffer
+                self._check_and_process_results()
+                time.sleep(0.01)
+                continue
+
             ok, frame = self.cap.read()
             if not ok:
                 # Retour au début de la vidéo
@@ -285,6 +297,10 @@ class VideoProcessor(QThread):
             frame_idx += 1
             self.current_frame = frame_idx
             
+            # Store frame in buffer for synchronization
+            # We copy to ensure we hold a valid reference if cv2 reuses buffer (mostly for safety)
+            self.pending_frames[frame_idx] = frame.copy()
+
             # Send frame to WS
             timestamp = time.time()
             frame_b64 = encode_frame_jpeg(frame, self.jpeg_quality)
@@ -301,27 +317,48 @@ class VideoProcessor(QThread):
                 self.ws_worker.add_frame(message)
             
             # Check for results
-            try:
-                # Non-blocking check for results, or wait briefly
-                while not self.ws_worker.result_queue.empty():
-                    result = self.ws_worker.result_queue.get_nowait()
-                    if result.get('type') == 'result':
-                        self._process_result(frame, result)
-            except queue.Empty:
-                pass
+            self._check_and_process_results()
             
-            # Small delay to throttle if needed, though loop speed is mainly determined by capture and processing
-            time.sleep(0.01)
+            # Small delay to throttle if needed
+            time.sleep(0.005)
 
-    def _process_result(self, frame, result):
+    def _check_and_process_results(self):
+        """Helper to check result queue and process"""
+        try:
+            # Non-blocking check for results
+            while not self.ws_worker.result_queue.empty():
+                result = self.ws_worker.result_queue.get_nowait()
+                if result.get('type') == 'result':
+                    self._process_result(result)
+        except queue.Empty:
+            pass
+
+    def _process_result(self, result):
         """Process results from API and update UI"""
+        frame_id = result.get('frame_id')
+
+        # Retrieve the original frame from buffer
+        if frame_id not in self.pending_frames:
+            # Frame might have been dropped or out of order?
+            # Or this is a result for a frame we didn't store (should not happen)
+            return
+
+        # Pop the frame - we are done with it
+        frame = self.pending_frames.pop(frame_id)
+
+        # Also clean up any older frames from buffer to prevent memory leaks
+        # (e.g. if we missed a response for frame N-1)
+        older_frames = [k for k in self.pending_frames.keys() if k < frame_id]
+        for k in older_frames:
+            del self.pending_frames[k]
+
         detections = result.get('detections', [])
         water_zone = result.get('water_zone')
         stats_api = result.get('stats', {})
         alerts = result.get('alerts', [])
         
         current_time = time.time()
-        
+
         # Handle Alerts
         for alert in alerts:
             msg = alert['message']
@@ -339,10 +376,6 @@ class VideoProcessor(QThread):
                     self.alert_popup.add_alert(msg, duration=8.0)
                     self.spoken_alerts.add(alert_key)
                     self.last_alert_time = current_time
-
-        # Clean up old alerts from spoken_alerts if needed (optional)
-        # For now, simplistic approach: if no danger detected for a while, we could reset.
-        # But the cooldown prevents spamming.
 
         # Prepare stats for UI
         max_score = 0
