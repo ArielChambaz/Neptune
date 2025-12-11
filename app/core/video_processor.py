@@ -277,14 +277,21 @@ class VideoProcessor(QThread):
     
     def recalculate_water_detection(self) -> bool:
         """
-        Recalcule la détection d'eau.
-        Note: Since logic is on server, we might need a specific API endpoint or
-        msg type to trigger this on server if supported.
-        For now, this might be limited or we rely on the continuous server analysis.
+        Sends a request to the server to recalculate the water zone.
         """
-        # TODO: Implement API call to reset/recalculate water zone on server if supported
-        print("[VideoProcessor] Recalculate water detection requested (Server side logic)")
-        return True
+        if self.ws_worker and self.ws_worker.running:
+            recalc_msg = {
+                'type': 'recalculate_water',
+                'session_id': self.session_id
+            }
+            try:
+                self.ws_worker.loop.call_soon_threadsafe(self.ws_worker.send_queue.put_nowait, recalc_msg)
+                print("[VideoProcessor] Recalculate water detection requested")
+                return True
+            except Exception as e:
+                print(f"[VideoProcessor] Failed to request water recalc: {e}")
+                return False
+        return False
     
     def run(self):
         """Boucle principale de traitement vidéo"""

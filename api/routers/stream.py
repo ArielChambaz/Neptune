@@ -57,7 +57,9 @@ async def websocket_realtime_stream(websocket: WebSocket):
                     'frame_count': 0,
                     'start_time': time.time(),
                     'total_processing_time': 0,
-                    'alerts': []
+                    'alerts': [],
+                    'water_zone': None,
+                    'recalc_water_trigger': False
                 }
                 
                 logger.info(f"Initialized streaming session: {session_id}")
@@ -89,6 +91,13 @@ async def websocket_realtime_stream(websocket: WebSocket):
                         'type': 'config_updated',
                         'message': 'Configuration updated successfully'
                     })
+
+            elif msg_type == 'recalculate_water':
+                 # Trigger water zone recalculation
+                session_id = message.get('session_id')
+                if session_id and session_id in active_sessions:
+                    active_sessions[session_id]['recalc_water_trigger'] = True
+                    logger.info(f"Session {session_id}: Water zone recalculation requested")
 
             elif msg_type == 'frame':
                 # Process incoming frame
@@ -133,8 +142,14 @@ async def websocket_realtime_stream(websocket: WebSocket):
                     conf_threshold=session['conf_threshold']
                 )
                 
-                # Detect water zone
-                water_zone, water_time = detection_service.detect_water_zone(frame)
+                # Detect water zone (Only if triggered or missing)
+                if session['recalc_water_trigger'] or session['water_zone'] is None:
+                     water_zone, water_time = detection_service.detect_water_zone(frame)
+                     session['water_zone'] = water_zone
+                     session['recalc_water_trigger'] = False
+                     logger.info(f"Session {session_id}: Water zone updated")
+
+                water_zone = session['water_zone']
                 
                 # Update tracker
                 tracker = session['tracker']
