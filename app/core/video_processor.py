@@ -211,14 +211,13 @@ class VideoProcessor(QThread):
         self.session_id = None
         self.loop = None
 
-        # Frame buffer for synchronization
-        self.pending_frames = {}
-        self.max_pending_frames = 10
-
-        # Display Ordering and State Caching
-        self.next_display_frame_id = 1
-        self.result_buffer = {}
-        self.last_water_zone = None
+        # Latest state for display (decoupled from inference loop)
+        self.latest_result = {
+            'detections': [],
+            'water_zone': None,
+            'stats': {},
+            'alerts': []
+        }
 
     @property
     def skip_frames(self):
@@ -295,10 +294,14 @@ class VideoProcessor(QThread):
         self.is_running = True
         self.session_id = f"stream_{int(time.time() * 1000)}"
         self.spoken_alerts.clear()
-        self.pending_frames.clear()
-        self.result_buffer.clear()
-        self.next_display_frame_id = 1
-        self.last_water_zone = None
+
+        # Reset state
+        self.latest_result = {
+            'detections': [],
+            'water_zone': None,
+            'stats': {},
+            'alerts': []
+        }
 
         # Start WebSocket Worker in a separate thread with its own event loop
         self.loop = asyncio.new_event_loop()
@@ -325,23 +328,21 @@ class VideoProcessor(QThread):
 
         frame_idx = 0
         frame_counter = 0
-        start_time = time.time()
+
+        # Target frame interval for 15 FPS
+        target_interval = 1.0 / 15.0
         
         while self.is_running:
+            loop_start = time.time()
+
             if self.is_paused:
                 time.sleep(0.1)
                 continue
             
-            # Backpressure: if pending frames buffer is full, wait
-            if len(self.pending_frames) >= self.max_pending_frames:
-                # Check for results to clear buffer
-                self._check_and_process_results()
-                time.sleep(0.01)
-                continue
-
+            # Read frame
             ok, frame = self.cap.read()
             if not ok:
-                # Retour au début de la vidéo
+                # Retour au début de la vidéo (boucle infinie pour simuler caméra)
                 self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                 continue
             
@@ -349,13 +350,10 @@ class VideoProcessor(QThread):
             frame_idx += 1
             self.current_frame = frame_idx
             
-            # Store frame in buffer for synchronization
-            self.pending_frames[frame_idx] = frame.copy()
-
+            # Decoupled Inference: Send if needed, don't wait
             should_infer = (frame_counter % self.skip_frames == 0)
 
-            if should_infer:
-                # Send frame to WS
+            if should_infer and self.ws_worker.running:
                 timestamp = time.time()
                 frame_b64 = encode_frame_jpeg(frame, self.jpeg_quality)
 
@@ -367,137 +365,106 @@ class VideoProcessor(QThread):
                     'timestamp': timestamp
                 }
 
-                if self.ws_worker.running:
-                    self.ws_worker.add_frame(message)
-            else:
-                # Skipped frame: create dummy result
-                dummy_result = {
-                    'type': 'result',
-                    'frame_id': frame_idx,
-                    'session_id': self.session_id,
-                    'detections': [], # No detections for skipped frames
-                    'water_zone': None, # Will be filled from cache
-                    'stats': {}, # Will not trigger stats update
-                    'alerts': [],
-                    'is_skipped': True
-                }
-                # Add to result queue to maintain pipeline flow (or process directly?
-                # using queue ensures thread safety if we change architecture later)
-                self.ws_worker.result_queue.put(dummy_result)
-            
-            # Check for results
-            self._check_and_process_results()
-            
-            # Small delay to throttle if needed
-            time.sleep(0.005)
+                # Fire and forget (queue handles backpressure by dropping if full)
+                self.ws_worker.add_frame(message)
 
-    def _check_and_process_results(self):
-        """Helper to check result queue and process"""
+            # Check for results (updates self.latest_result)
+            self._check_and_update_state()
+
+            # Immediate Display: Draw whatever latest result we have on the CURRENT frame
+            # This causes the "bbox lag" effect requested by user, but keeps 15 FPS fluid.
+            
+            # Retrieve cached data
+            res = self.latest_result
+            detections = res.get('detections', [])
+            water_zone = res.get('water_zone')
+            
+            # Draw
+            vis = self._draw_detections(frame, detections, water_zone)
+            self.frameReady.emit(vis)
+
+            # Maintain 15 FPS
+            elapsed = time.time() - loop_start
+            wait_time = max(0, target_interval - elapsed)
+            time.sleep(wait_time)
+
+    def _check_and_update_state(self):
+        """Helper to check result queue and update latest state"""
         try:
-            # Non-blocking check for results
+            # Drain queue to get the absolute latest result if multiple arrived
+            latest = None
             while not self.ws_worker.result_queue.empty():
                 result = self.ws_worker.result_queue.get_nowait()
                 if result.get('type') == 'result':
-                    self._process_result(result)
+                    latest = result
+
+            if latest:
+                self._update_state_from_result(latest)
+
         except queue.Empty:
             pass
 
-    def _process_result(self, result):
-        """Buffer results and process them in order"""
-        fid = result.get('frame_id')
-        if fid:
-            self.result_buffer[fid] = result
+    def _update_state_from_result(self, result):
+        """Update the internal state with new API results"""
 
-        # Process available results in strict order
-        while self.next_display_frame_id in self.result_buffer:
-            res = self.result_buffer.pop(self.next_display_frame_id)
-            self._display_result(res)
-            self.next_display_frame_id += 1
+        # Update latest result cache
+        self.latest_result['detections'] = result.get('detections', [])
 
-    def _display_result(self, result):
-        """Display the result on the corresponding frame"""
-        frame_id = result.get('frame_id')
+        wz = result.get('water_zone')
+        if wz is not None:
+             self.latest_result['water_zone'] = wz
 
-        # Retrieve the original frame from buffer
-        if frame_id not in self.pending_frames:
-            # Frame might have been dropped or out of order
-            return
-
-        # Pop the frame - we are done with it
-        frame = self.pending_frames.pop(frame_id)
-
-        # Also clean up any older frames from buffer to prevent memory leaks
-        # (This handles cases where we might have skipped a frame ID due to error, though reordering prevents this mostly)
-        older_frames = [k for k in self.pending_frames.keys() if k < frame_id]
-        for k in older_frames:
-            del self.pending_frames[k]
-
-        is_skipped = result.get('is_skipped', False)
-
-        # Handle Water Zone Caching
-        if not is_skipped:
-            self.last_water_zone = result.get('water_zone')
-
-        # Use current result's water zone if available, else cache
-        water_zone = result.get('water_zone')
-        if water_zone is None:
-            water_zone = self.last_water_zone
-
-        detections = result.get('detections', [])
         stats_api = result.get('stats', {})
+        self.latest_result['stats'] = stats_api
+
         alerts = result.get('alerts', [])
         
+        # Handle Alerts immediately
         current_time = time.time()
+        for alert in alerts:
+            msg = alert['message']
+            self.alertTriggered.emit(msg)
 
-        if not is_skipped:
-            # Handle Alerts (only on inferred frames)
-            for alert in alerts:
-                msg = alert['message']
-                self.alertTriggered.emit(msg)
+            # Check for danger alerts and speak if not already spoken recently
+            if "DANGER" in msg or "danger" in msg.lower():
+                track_id = alert.get('track_id')
+                alert_key = track_id if track_id is not None else msg
 
-                # Check for danger alerts and speak if not already spoken recently
-                if "DANGER" in msg or "danger" in msg.lower():
-                    track_id = alert.get('track_id')
-                    alert_key = track_id if track_id is not None else msg
+                if alert_key not in self.spoken_alerts or (current_time - self.last_alert_time > self.alert_cooldown):
+                    speak_alert("danger")
+                    self.alert_popup.add_alert(msg, duration=8.0)
+                    self.spoken_alerts.add(alert_key)
+                    self.last_alert_time = current_time
 
-                    if alert_key not in self.spoken_alerts or (current_time - self.last_alert_time > self.alert_cooldown):
-                        speak_alert("danger")
-                        self.alert_popup.add_alert(msg, duration=8.0)
-                        self.spoken_alerts.add(alert_key)
-                        self.last_alert_time = current_time
+        # Prepare stats for UI
+        detections = self.latest_result['detections']
+        max_score = 0
+        max_score_id = None
+        underwater_count = 0
+        danger_count = 0
+        active_count = len(detections)
 
-            # Prepare stats for UI
-            max_score = 0
-            max_score_id = None
-            underwater_count = 0
-            danger_count = 0
-            active_count = len(detections)
+        for det in detections:
+            score = det['dangerosity_score']
+            if score > max_score:
+                max_score = score
+                max_score_id = det['track_id']
+            if det['status'] == 'underwater':
+                underwater_count += 1
+            if det['status'] == 'danger':
+                danger_count += 1
 
-            for det in detections:
-                score = det['dangerosity_score']
-                if score > max_score:
-                    max_score = score
-                    max_score_id = det['track_id']
-                if det['status'] == 'underwater':
-                    underwater_count += 1
-                if det['status'] == 'danger':
-                    danger_count += 1
-
-            stats = {
-                'active': active_count,
-                'underwater': underwater_count,
-                'danger': danger_count,
-                'max_score': max_score,
-                'max_score_id': max_score_id,
-                # Add API specific stats
-                'api_fps': stats_api.get('fps', 0),
-                'api_proc_time': stats_api.get('processing_time_ms', 0)
-            }
-            self.statsReady.emit(stats)
-
-        # Draw on frame
-        vis = self._draw_detections(frame, detections, water_zone)
-        self.frameReady.emit(vis)
+        stats = {
+            'active': active_count,
+            'underwater': underwater_count,
+            'danger': danger_count,
+            'max_score': max_score,
+            'max_score_id': max_score_id,
+            # Add API specific stats
+            'api_fps': stats_api.get('fps', 0),
+            'api_proc_time': stats_api.get('processing_time_ms', 0)
+        }
+        self.statsReady.emit(stats)
 
     def _draw_detections(self, frame, detections, water_zone):
         """Draw detections on frame (matching app renderer style)"""
