@@ -59,3 +59,15 @@ UI = {
     'video_panel_min_width': 800,
     'video_panel_min_height': 600,
 }
+
+# === Configuration de la minimap ===
+MINIMAP = {
+    'width': 200,           # Largeur de la minimap en pixels
+    'height': 150,          # Hauteur de la minimap en pixels
+    'margin': 15,           # Marge depuis le bord de la vidéo
+    'bg_color': (40, 40, 40),  # Couleur de fond (BGR)
+    'border_color': (100, 100, 100),  # Couleur de bordure (BGR)
+    'border_thickness': 2,
+    'opacity': 0.85,        # Opacité de la minimap (0-1)
+    'trail_length': 15,     # Nombre de positions dans la trace
+}
