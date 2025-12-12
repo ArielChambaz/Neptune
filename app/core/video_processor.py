@@ -654,19 +654,24 @@ class VideoProcessor(QThread):
 
         # Draw minimap in top-right corner
         if self.show_minimap:
-            minimap = self._create_minimap(detections)
-            map_h, map_w = minimap.shape[:2]
-            margin = MINIMAP['margin']
+            try:
+                minimap = self._create_minimap(detections)
+                map_h, map_w = minimap.shape[:2]
+                margin = MINIMAP['margin']
 
-            # Position: top-right corner
-            x_offset = vis.shape[1] - map_w - margin
-            y_offset = margin
+                # Position: top-right corner
+                x_offset = vis.shape[1] - map_w - margin
+                y_offset = margin
 
-            # Apply with opacity blending
-            opacity = MINIMAP['opacity']
-            roi = vis[y_offset:y_offset + map_h, x_offset:x_offset + map_w]
-            blended = cv2.addWeighted(roi, 1 - opacity, minimap, opacity, 0)
-            vis[y_offset:y_offset + map_h, x_offset:x_offset + map_w] = blended
+                # Check bounds
+                if x_offset >= 0 and y_offset >= 0 and x_offset + map_w <= vis.shape[1] and y_offset + map_h <= vis.shape[0]:
+                    # Apply with opacity blending
+                    opacity = MINIMAP['opacity']
+                    roi = vis[y_offset:y_offset + map_h, x_offset:x_offset + map_w]
+                    blended = cv2.addWeighted(roi, 1 - opacity, minimap, opacity, 0)
+                    vis[y_offset:y_offset + map_h, x_offset:x_offset + map_w] = blended
+            except Exception as e:
+                print(f"[Minimap] Error: {e}")
 
         return vis
 

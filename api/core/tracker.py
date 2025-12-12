@@ -167,29 +167,33 @@ class UnderwaterPersonTracker:
         """Assigne les détections aux tracks existants"""
         track_ids = list(self.tracks.keys())
         track_centers = [self.tracks[tid]['center'] for tid in track_ids]
-        
+
+        # Mark all tracks as potentially disappeared (will be reset if assigned)
+        for tid in track_ids:
+            self.tracks[tid]['_assigned_this_frame'] = False
+
         # Calcul des distances
         distances = np.zeros((len(track_centers), len(det_centers)))
         for i, tc in enumerate(track_centers):
             for j, dc in enumerate(det_centers):
                 distances[i, j] = math.hypot(tc[0] - dc[0], tc[1] - dc[1])
-        
+
         # Création des paires possibles
         pairs = [(distances[i, j], i, j)
                  for i in range(len(track_centers))
                  for j in range(len(det_centers))
                  if distances[i, j] < self.max_distance]
         pairs.sort(key=lambda x: x[0])
-        
+
         # Association greedy
         assignments, used_t, used_d = {}, set(), set()
         for _, i, j in pairs:
             if i in used_t or j in used_d:
                 continue
-            
+
             tid = track_ids[i]
             t = self.tracks[tid]
-            
+
             # Mise à jour du track avec nouvelles dimensions
             t['center'] = det_centers[j]
             w, h, conf = det_dims[j]
@@ -197,11 +201,12 @@ class UnderwaterPersonTracker:
             t['height'] = h
             t['confidence'] = conf
             t['disappeared'] = 0
+            t['_assigned_this_frame'] = True
             t['history'].append(det_centers[j])
             t['last_seen_surface'] = frame_ts
             t['frames_on_surface'] += 1
             t['frames_underwater'] = 0
-            
+
             # Retour en surface
             if t['status'] == 'underwater' and t['frames_on_surface'] >= self.surface_threshold:
                 if t['underwater_start_time']:
@@ -211,15 +216,15 @@ class UnderwaterPersonTracker:
                 t['underwater_start_time'] = None
                 t['danger_alert_sent'] = False
                 t['voice_alert_sent'] = False
-            
+
             # Limitation de l'historique
             if len(t['history']) > 50:
                 t['history'] = t['history'][-50:]
-            
+
             assignments[j] = tid
             used_t.add(i)
             used_d.add(j)
-        
+
         return assignments
     
     def _create_new_tracks_for_unassigned(self, det_centers, det_dims, assignments, frame_ts):
@@ -234,16 +239,13 @@ class UnderwaterPersonTracker:
     
     def _handle_disappeared_tracks(self, frame_ts):
         """Gère les tracks non assignés (disparus)"""
-        assigned_track_ids = set()
-        # On récupère les tracks qui ont été assignés dans cette frame
-        # (cette logique est déjà gérée dans _assign_detections_to_tracks)
-        
         for tid, t in self.tracks.items():
-            if t['disappeared'] > 0:  # Track non assigné dans cette frame
+            # Check if track was NOT assigned in this frame
+            if not t.get('_assigned_this_frame', True):
                 t['disappeared'] += 1
                 t['frames_underwater'] += 1
                 t['frames_on_surface'] = 0
-                
+
                 if t['frames_underwater'] >= self.underwater_threshold:
                     if t['status'] != 'underwater':
                         t['status'] = 'underwater'
@@ -251,18 +253,19 @@ class UnderwaterPersonTracker:
                         t['dive_point'] = t['center']
                         t['danger_alert_sent'] = False
                         t['voice_alert_sent'] = False
-                        print(f"Person {tid} UNDERWATER")
-                    
+                        print(f"[Tracker] Person {tid} UNDERWATER (frames_underwater={t['frames_underwater']})")
+
                     if t['underwater_start_time']:
                         t['underwater_duration'] = frame_ts - t['underwater_start_time']
                         if t['underwater_duration'] > self.danger_threshold and not t['danger_alert_sent']:
-                            print(f"DANGER ALERT: Person {tid} underwater {t['underwater_duration']:.1f}s")
+                            print(f"[Tracker] DANGER ALERT: Person {tid} underwater {t['underwater_duration']:.1f}s")
                             t['danger_alert_sent'] = True
-                
-                # Mise à jour du score pour les tracks disparus aussi
+
+                # Mise à jour du score pour les tracks disparus
                 t['dangerosity_score'] = calculate_dangerosity_score(
                     t, frame_ts, t.get('distance_from_shore', 0.0)
                 )
+                print(f"[Tracker] Track {tid} disappeared: frames_underwater={t['frames_underwater']}, score={t['dangerosity_score']}")
     
     def _remove_old_tracks(self, frame_ts):
         """Supprime les tracks trop anciens"""
