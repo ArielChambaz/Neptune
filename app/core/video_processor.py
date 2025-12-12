@@ -17,9 +17,10 @@ import queue
 from PyQt6.QtCore import QThread, pyqtSignal, QObject
 import websockets
 
-from config_pyqt6 import API, DETECTION, ALERTS
+from config_pyqt6 import API, DETECTION, ALERTS, MINIMAP
 from utils.audio import speak_alert
 from utils.alerts import AlertPopup
+from core.homography import HomographyTransformer
 
 # --- Helper functions (adapted from streamlit_app.py) ---
 def encode_frame_jpeg(frame, quality=75):
@@ -219,6 +220,14 @@ class VideoProcessor(QThread):
             'alerts': []
         }
 
+        # Homography transformer for minimap
+        self.homography = HomographyTransformer(
+            minimap_width=MINIMAP['width'],
+            minimap_height=MINIMAP['height']
+        )
+        self.show_minimap = True
+        self.frame_idx = 0  # For animation effects
+
     @property
     def skip_frames(self):
         return self._skip_frames
@@ -356,6 +365,7 @@ class VideoProcessor(QThread):
             frame_counter += 1
             frame_idx += 1
             self.current_frame = frame_idx
+            self.frame_idx = frame_idx  # For minimap animations
             
             # Decoupled Inference: Send if needed, don't wait
             should_infer = (frame_counter % self.skip_frames == 0)
@@ -419,7 +429,10 @@ class VideoProcessor(QThread):
 
         wz = result.get('water_zone')
         if wz is not None:
-             self.latest_result['water_zone'] = wz
+            self.latest_result['water_zone'] = wz
+            # Update homography if water zone polygon is available
+            if wz.get('detected') and wz.get('polygon'):
+                self.homography.set_source_from_polygon(wz['polygon'])
 
         stats_api = result.get('stats', {})
         self.latest_result['stats'] = stats_api
@@ -472,6 +485,92 @@ class VideoProcessor(QThread):
             'api_proc_time': stats_api.get('processing_time_ms', 0)
         }
         self.statsReady.emit(stats)
+
+    def _create_minimap(self, detections):
+        """
+        Create the minimap with swimmer positions using homography transformation.
+
+        Args:
+            detections: List of detection dictionaries from API
+
+        Returns:
+            np.ndarray: Minimap canvas image (BGR)
+        """
+        map_w = MINIMAP['width']
+        map_h = MINIMAP['height']
+
+        # Create canvas with background color
+        bg_color = MINIMAP['bg_color']
+        map_canvas = np.full((map_h, map_w, 3), bg_color, dtype=np.uint8)
+
+        # Draw border
+        border_color = MINIMAP['border_color']
+        cv2.rectangle(map_canvas, (0, 0), (map_w - 1, map_h - 1), border_color, MINIMAP['border_thickness'])
+
+        # Draw "MINIMAP" label
+        cv2.putText(map_canvas, "MINIMAP", (5, 12), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (150, 150, 150), 1)
+
+        # Check if homography is ready
+        if not self.homography.is_valid():
+            cv2.putText(map_canvas, "Calibrating...", (map_w // 2 - 40, map_h // 2),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (100, 100, 100), 1)
+            return map_canvas
+
+        # Draw water zone outline on minimap
+        margin = 10
+        water_pts = np.array([
+            [margin, margin],
+            [map_w - margin, margin],
+            [map_w - margin, map_h - margin],
+            [margin, map_h - margin]
+        ], dtype=np.int32)
+        cv2.polylines(map_canvas, [water_pts], True, (100, 50, 0), 1)  # Dark blue outline
+
+        # Draw each detection on the minimap
+        for det in detections:
+            bbox = det['bbox']
+            # Use bottom center of bbox as the person's foot position
+            cx = bbox['center_x']
+            cy = bbox['center_y'] + bbox['height'] / 2  # Bottom of bbox
+
+            # Transform to minimap coordinates
+            map_pos = self.homography.transform_point((cx, cy))
+            if map_pos is None:
+                continue
+
+            mx, my = map_pos
+
+            # Clamp to minimap bounds
+            mx = max(0, min(map_w - 1, mx))
+            my = max(0, min(map_h - 1, my))
+
+            # Get color based on dangerosity
+            score = det.get('dangerosity_score', 0)
+            color = get_color_by_dangerosity(score)
+            status = det.get('status', 'visible')
+            track_id = det.get('track_id', 0)
+            is_danger = (status == 'danger')
+            is_underwater = (status == 'underwater')
+
+            # Draw the point
+            if is_danger:
+                # Pulsing red circle for danger
+                pulse = 6 + int(2 * np.sin(self.frame_idx * 0.3))
+                cv2.circle(map_canvas, (mx, my), pulse, (0, 0, 255), 2)
+                cv2.circle(map_canvas, (mx, my), 4, (0, 0, 255), -1)
+            elif is_underwater:
+                # Filled circle for underwater
+                cv2.circle(map_canvas, (mx, my), 5, color, -1)
+                cv2.circle(map_canvas, (mx, my), 7, (0, 165, 255), 1)  # Orange outline
+            else:
+                # Simple filled circle
+                cv2.circle(map_canvas, (mx, my), 4, color, -1)
+
+            # Draw track ID
+            cv2.putText(map_canvas, str(track_id), (mx + 6, my - 4),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.3, color, 1)
+
+        return map_canvas
 
     def _draw_detections(self, frame, detections, water_zone):
         """Draw detections on frame (matching app renderer style)"""
@@ -552,6 +651,22 @@ class VideoProcessor(QThread):
             for i, a in enumerate(alerts[-3:]):
                 col = (0, 0, 255) if "DANGER" in a else (255, 165, 0)
                 cv2.putText(vis, f"• {a}", (40, base_y+45 + i*30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, col, 2)
+
+        # Draw minimap in top-right corner
+        if self.show_minimap:
+            minimap = self._create_minimap(detections)
+            map_h, map_w = minimap.shape[:2]
+            margin = MINIMAP['margin']
+
+            # Position: top-right corner
+            x_offset = vis.shape[1] - map_w - margin
+            y_offset = margin
+
+            # Apply with opacity blending
+            opacity = MINIMAP['opacity']
+            roi = vis[y_offset:y_offset + map_h, x_offset:x_offset + map_w]
+            blended = cv2.addWeighted(roi, 1 - opacity, minimap, opacity, 0)
+            vis[y_offset:y_offset + map_h, x_offset:x_offset + map_w] = blended
 
         return vis
 
