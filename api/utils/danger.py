@@ -14,36 +14,38 @@ DANGER_TIME_THRESHOLD = ALERTS['danger_threshold']
 def calculate_dangerosity_score(track, frame_ts, dist_from_shore=0.0):
     """
     Calculate the dangerosity score of a tracker
-    
+
     Args:
         track: Dictionary containing tracker information
         frame_ts: Current frame timestamp
         dist_from_shore: Distance from shore (0.0 to 1.0)
-    
+
     Returns:
         int: Danger score from 0 to 100
     """
     score = int(dist_from_shore * 20)  # 0..20
-    
+
+    # Score based on frames_underwater (when person is not detected)
     if track['frames_underwater'] > 0:
         prog = min(track['frames_underwater'] / UNDERWATER_THRESHOLD, 1.0)
         score += int(10 + 20 * prog)  # 10..30
-        
-        if track['status'] == 'underwater':
-            score += 20
-            
-            if track['underwater_start_time']:
-                t = frame_ts - track['underwater_start_time']
-                if t > DANGER_TIME_THRESHOLD:
-                    score += 40
-                    if not track['danger_alert_sent']:
-                        track['danger_alert_sent'] = True
-                else:
-                    score += int((t / DANGER_TIME_THRESHOLD) * 40)
-        
+
         if track['frames_underwater'] > UNDERWATER_THRESHOLD:
             score += min(10, (track['frames_underwater'] - UNDERWATER_THRESHOLD) // 10)
-    
+
+    # Score based on underwater status (can be set even if person is now visible)
+    if track['status'] == 'underwater':
+        score += 20
+
+        if track['underwater_start_time']:
+            t = frame_ts - track['underwater_start_time']
+            if t > DANGER_TIME_THRESHOLD:
+                score += 40
+                if not track['danger_alert_sent']:
+                    track['danger_alert_sent'] = True
+            else:
+                score += int((t / DANGER_TIME_THRESHOLD) * 40)
+
     return min(100, score)
 
 
