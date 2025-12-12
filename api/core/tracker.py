@@ -120,12 +120,12 @@ class UnderwaterPersonTracker:
     def _handle_no_detections(self, frame_ts):
         """Gère le cas où aucune détection n'est trouvée"""
         to_remove = []
-        
+
         for tid, t in self.tracks.items():
             t['disappeared'] += 1
             t['frames_underwater'] += 1
             t['frames_on_surface'] = 0
-            
+
             if t['frames_underwater'] >= self.underwater_threshold:
                 if t['status'] != 'underwater':
                     t['status'] = 'underwater'
@@ -133,23 +133,29 @@ class UnderwaterPersonTracker:
                     t['dive_point'] = t['center']
                     t['danger_alert_sent'] = False
                     t['voice_alert_sent'] = False
-                    print(f"Person {tid} UNDERWATER")
-                
+                    print(f"[Tracker] Person {tid} UNDERWATER (frames_underwater={t['frames_underwater']})")
+
                 if t['underwater_start_time']:
                     t['underwater_duration'] = frame_ts - t['underwater_start_time']
                     if t['underwater_duration'] > self.danger_threshold and not t['danger_alert_sent']:
-                        print(f"DANGER ALERT: Person {tid} underwater {t['underwater_duration']:.1f}s")
+                        print(f"[Tracker] DANGER ALERT: Person {tid} underwater {t['underwater_duration']:.1f}s")
                         t['danger_alert_sent'] = True
-            
+
+            # Calculate dangerosity score
+            t['dangerosity_score'] = calculate_dangerosity_score(
+                t, frame_ts, t.get('distance_from_shore', 0.0)
+            )
+            print(f"[Tracker] Track {tid} no detection: frames_underwater={t['frames_underwater']}, score={t['dangerosity_score']}")
+
             if t['disappeared'] > self.max_disappeared:
                 if t['status'] == 'underwater' and t['underwater_start_time']:
                     dur = frame_ts - t['underwater_start_time']
                     t['submersion_events'].append((t['underwater_start_time'], dur))
                 to_remove.append(tid)
-        
+
         for tid in to_remove:
             del self.tracks[tid]
-        
+
         return {}
     
     def _create_initial_tracks(self, det_centers, det_dims, frame_ts):
